@@ -17,38 +17,49 @@ limitations under the License.
 package v1beta1
 
 import (
+	"strings"
+
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
-	"github.com/openyurtio/openyurt/pkg/apis/apps/v1alpha1"
+	"github.com/openyurtio/openyurt/pkg/apis/apps"
+	"github.com/openyurtio/openyurt/pkg/apis/apps/v1beta2"
 )
 
 func (src *NodePool) ConvertTo(dstRaw conversion.Hub) error {
-	dst := dstRaw.(*v1alpha1.NodePool)
+	dst := dstRaw.(*v1beta2.NodePool)
 
 	dst.ObjectMeta = src.ObjectMeta
 
-	dst.Spec.Type = v1alpha1.NodePoolType(src.Spec.Type)
-	dst.Spec.Selector = src.Spec.Selector
+	dst.Spec.Type = v1beta2.NodePoolType(src.Spec.Type)
+	dst.Spec.Labels = src.Spec.Labels
 	dst.Spec.Annotations = src.Spec.Annotations
 	dst.Spec.Taints = src.Spec.Taints
+	if strings.EqualFold(src.Annotations[apps.NodePoolHostNetworkLabel], "true") {
+		dst.Spec.HostNetwork = true
+	}
 
 	dst.Status.ReadyNodeNum = src.Status.ReadyNodeNum
 	dst.Status.UnreadyNodeNum = src.Status.UnreadyNodeNum
 	dst.Status.Nodes = src.Status.Nodes
 
-	klog.Infof("convert from v1beta1 to v1alpha1 for %s", dst.Name)
+	// Set interconnectivity to false which will not use leader election strategy or reuse list/watch events
+	dst.Spec.InterConnectivity = false
+	dst.Spec.LeaderElectionStrategy = string(v1beta2.ElectionStrategyRandom)
+	dst.Spec.LeaderReplicas = 1
+
+	klog.V(4).Infof("convert from v1beta to v1beta2 for nodepool %s", dst.Name)
 
 	return nil
 }
 
 func (dst *NodePool) ConvertFrom(srcRaw conversion.Hub) error {
-	src := srcRaw.(*v1alpha1.NodePool)
+	src := srcRaw.(*v1beta2.NodePool)
 
 	dst.ObjectMeta = src.ObjectMeta
 
 	dst.Spec.Type = NodePoolType(src.Spec.Type)
-	dst.Spec.Selector = src.Spec.Selector
+	dst.Spec.Labels = src.Spec.Labels
 	dst.Spec.Annotations = src.Spec.Annotations
 	dst.Spec.Taints = src.Spec.Taints
 
@@ -56,6 +67,13 @@ func (dst *NodePool) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.Status.UnreadyNodeNum = src.Status.UnreadyNodeNum
 	dst.Status.Nodes = src.Status.Nodes
 
-	klog.Infof("convert from v1alpha1 to v1beta1 for %s", dst.Name)
+	if src.Spec.HostNetwork {
+		if dst.Annotations == nil {
+			dst.Annotations = make(map[string]string)
+		}
+		dst.Annotations[apps.NodePoolHostNetworkLabel] = "true"
+	}
+
+	klog.V(4).Infof("convert from v1beta2 to v1beta1 for nodepool %s", dst.Name)
 	return nil
 }

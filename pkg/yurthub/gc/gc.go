@@ -31,8 +31,9 @@ import (
 
 	"github.com/openyurtio/openyurt/cmd/yurthub/app/config"
 	"github.com/openyurtio/openyurt/pkg/yurthub/cachemanager"
-	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/rest"
+	"github.com/openyurtio/openyurt/pkg/yurthub/healthchecker"
 	"github.com/openyurtio/openyurt/pkg/yurthub/storage"
+	"github.com/openyurtio/openyurt/pkg/yurthub/transport"
 	"github.com/openyurtio/openyurt/pkg/yurthub/util"
 )
 
@@ -43,7 +44,8 @@ var (
 // GCManager is responsible for cleanup garbage of yurthub
 type GCManager struct {
 	store             cachemanager.StorageWrapper
-	restConfigManager *rest.RestConfigManager
+	healthChecker     healthchecker.Interface
+	clientManager     transport.Interface
 	nodeName          string
 	eventsGCFrequency time.Duration
 	lastTime          time.Time
@@ -51,7 +53,7 @@ type GCManager struct {
 }
 
 // NewGCManager creates a *GCManager object
-func NewGCManager(cfg *config.YurtHubConfiguration, restConfigManager *rest.RestConfigManager, stopCh <-chan struct{}) (*GCManager, error) {
+func NewGCManager(cfg *config.YurtHubConfiguration, healthChecker healthchecker.Interface, stopCh <-chan struct{}) (*GCManager, error) {
 	gcFrequency := cfg.GCFrequency
 	if gcFrequency == 0 {
 		gcFrequency = defaultEventGcInterval
@@ -60,7 +62,8 @@ func NewGCManager(cfg *config.YurtHubConfiguration, restConfigManager *rest.Rest
 		// TODO: use disk storage directly
 		store:             cfg.StorageWrapper,
 		nodeName:          cfg.NodeName,
-		restConfigManager: restConfigManager,
+		healthChecker:     healthChecker,
+		clientManager:     cfg.TransportAndDirectClientManager,
 		eventsGCFrequency: time.Duration(gcFrequency) * time.Minute,
 		stopCh:            stopCh,
 	}
@@ -75,14 +78,14 @@ func (m *GCManager) Run() {
 	go wait.JitterUntil(func() {
 		klog.V(2).Infof("start gc events after waiting %v from previous gc", time.Since(m.lastTime))
 		m.lastTime = time.Now()
-		cfg := m.restConfigManager.GetRestConfig(true)
-		if cfg == nil {
-			klog.Errorf("could not get rest config, so skip gc")
+		u := m.healthChecker.PickOneHealthyBackend()
+		if u == nil {
+			klog.Warningf("all remote servers are unhealthy, skip gc events")
 			return
 		}
-		kubeClient, err := clientset.NewForConfig(cfg)
-		if err != nil {
-			klog.Errorf("could not new kube client, %v", err)
+		kubeClient := m.clientManager.GetDirectClientset(u)
+		if kubeClient == nil {
+			klog.Warningf("couldn't get direct clientset for server %s, skip gc events", u.String())
 			return
 		}
 
@@ -98,7 +101,7 @@ func (m *GCManager) gcPodsWhenRestart() {
 		Resource: "pods",
 	})
 	if err != nil {
-		klog.Errorf("failed to list keys for kubelet pods, %v", err)
+		klog.Errorf("could not list keys for kubelet pods, %v", err)
 		return
 	} else if len(localPodKeys) == 0 {
 		klog.Infof("local storage for kubelet pods is empty, not need to gc pods")
@@ -109,14 +112,16 @@ func (m *GCManager) gcPodsWhenRestart() {
 	if len(localPodKeys) == 0 {
 		return
 	}
-	cfg := m.restConfigManager.GetRestConfig(true)
-	if cfg == nil {
-		klog.Errorf("could not get rest config, so skip gc pods when restart")
+
+	// get a clientset of a healthy kube-apiserver
+	u := m.healthChecker.PickOneHealthyBackend()
+	if u == nil {
+		klog.Warningf("all remote servers are unhealthy, skip gc pods")
 		return
 	}
-	kubeClient, err := clientset.NewForConfig(cfg)
-	if err != nil {
-		klog.Errorf("could not new kube client, %v", err)
+	kubeClient := m.clientManager.GetDirectClientset(u)
+	if kubeClient == nil {
+		klog.Warningf("couldn't get direct clientset for server %s, skip gc pods", u.String())
 		return
 	}
 
@@ -138,7 +143,7 @@ func (m *GCManager) gcPodsWhenRestart() {
 			Resources: "pods",
 		})
 		if err != nil {
-			klog.Errorf("failed to get pod key for %s/%s, %v", ns, name, err)
+			klog.Errorf("could not get pod key for %s/%s, %v", ns, name, err)
 			continue
 		}
 		currentPodKeys[key] = struct{}{}
@@ -159,9 +164,9 @@ func (m *GCManager) gcPodsWhenRestart() {
 
 	for _, key := range deletedPods {
 		if err := m.store.Delete(key); err != nil {
-			klog.Errorf("failed to gc pod %s, %v", key, err)
+			klog.Errorf("could not gc pod %s, %v", key.Key(), err)
 		} else {
-			klog.Infof("gc pod %s successfully", key)
+			klog.Infof("gc pod %s successfully", key.Key())
 		}
 	}
 
@@ -205,7 +210,7 @@ func (m *GCManager) gcEvents(kubeClient clientset.Interface, component string) {
 
 	for _, key := range deletedEvents {
 		if err := m.store.Delete(key); err != nil {
-			klog.Errorf("failed to gc events %s, %v", key.Key(), err)
+			klog.Errorf("could not gc events %s, %v", key.Key(), err)
 		} else {
 			klog.Infof("gc events %s successfully", key.Key())
 		}

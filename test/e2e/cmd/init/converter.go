@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,7 +31,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeclientset "k8s.io/client-go/kubernetes"
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
@@ -39,7 +39,6 @@ import (
 	nodeservant "github.com/openyurtio/openyurt/pkg/node-servant"
 	kubeadmapi "github.com/openyurtio/openyurt/pkg/util/kubernetes/kubeadm/app/phases/bootstraptoken/clusterinfo"
 	strutil "github.com/openyurtio/openyurt/pkg/util/strings"
-	"github.com/openyurtio/openyurt/pkg/yurthub/util"
 	"github.com/openyurtio/openyurt/test/e2e/cmd/init/lock"
 	kubeutil "github.com/openyurtio/openyurt/test/e2e/cmd/init/util/kubernetes"
 )
@@ -47,11 +46,12 @@ import (
 const (
 	// defaultYurthubHealthCheckTimeout defines the default timeout for yurthub health check phase
 	defaultYurthubHealthCheckTimeout = 2 * time.Minute
+	yssYurtHubCloudName              = "yurt-static-set-yurt-hub-cloud"
+	yssYurtHubName                   = "yurt-static-set-yurt-hub"
 )
 
 type ClusterConverter struct {
 	RootDir                   string
-	ComponentsBuilder         *kubeutil.Builder
 	ClientSet                 kubeclientset.Interface
 	CloudNodes                []string
 	EdgeNodes                 []string
@@ -61,7 +61,6 @@ type ClusterConverter struct {
 	YurtManagerImage          string
 	NodeServantImage          string
 	YurthubImage              string
-	EnableDummyIf             bool
 }
 
 func (c *ClusterConverter) Run() error {
@@ -81,16 +80,21 @@ func (c *ClusterConverter) Run() error {
 	}
 
 	klog.Info("Deploying yurt-manager")
-	if err := c.deployYurtManager(); err != nil {
+	if err := c.installYurtManagerByHelm(); err != nil {
 		klog.Errorf("failed to deploy yurt-manager with image %s, %s", c.YurtManagerImage, err)
 		return err
 	}
 
-	klog.Info("Running jobs for convert. Job running may take a long time, and job failure will not affect the execution of the next stage")
+	klog.Info(
+		"Running jobs for convert. Job running may take a long time, and job failure will not affect the execution of the next stage",
+	)
 
-	klog.Info("Running node-servant-convert jobs to deploy the yurt-hub and reset the kubelet service on edge and cloud nodes")
-	if err := c.deployYurthub(); err != nil {
+	klog.Info(
+		"Running node-servant-convert jobs to deploy the yurt-hub and reset the kubelet service on edge and cloud nodes",
+	)
+	if err := c.installYurthubByHelm(); err != nil {
 		klog.Errorf("error occurs when deploying Yurthub, %v", err)
+		c.dumpYurtManagerLog()
 		return err
 	}
 	return nil
@@ -104,14 +108,38 @@ func (c *ClusterConverter) labelEdgeNodes() error {
 	for _, node := range nodeLst.Items {
 		isEdge := strutil.IsInStringLst(c.EdgeNodes, node.Name)
 		if _, err = kubeutil.AddEdgeWorkerLabelAndAutonomyAnnotation(
-			c.ClientSet, &node, strconv.FormatBool(isEdge), "false"); err != nil {
+			c.ClientSet, &node, strconv.FormatBool(isEdge), "0"); err != nil {
 			return fmt.Errorf("failed to add label to edge node %s, %w", node.Name, err)
 		}
 	}
 	return nil
 }
 
-func (c *ClusterConverter) deployYurthub() error {
+func (c *ClusterConverter) installYurthubByHelm() error {
+	helmPath := filepath.Join(c.RootDir, "bin", "helm")
+	yurthubChartPath := filepath.Join(c.RootDir, "charts", "yurthub")
+
+	parts := strings.Split(c.YurthubImage, "/")
+	imageTagParts := strings.Split(parts[len(parts)-1], ":")
+	tag := imageTagParts[1]
+
+	// create the yurthub-cloud and yurthub yss
+	cmd := exec.Command(
+		helmPath,
+		"install",
+		"yurthub",
+		yurthubChartPath,
+		"--namespace",
+		"kube-system",
+		"--set",
+		fmt.Sprintf("kubernetesServerAddr=KUBERNETES_SERVER_ADDRESS,image.tag=%s", tag),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		klog.Errorf("couldn't install yurthub, %v, %s", err, string(output))
+		return err
+	}
+	klog.Infof("start to install yurthub, %s", string(output))
 	// deploy yurt-hub and reset the kubelet service on edge nodes.
 	joinToken, err := prepareYurthubStart(c.ClientSet, c.KubeConfigPath)
 	if err != nil {
@@ -119,66 +147,37 @@ func (c *ClusterConverter) deployYurthub() error {
 	}
 	convertCtx := map[string]string{
 		"node_servant_image": c.NodeServantImage,
-		"yurthub_image":      c.YurthubImage,
 		"joinToken":          joinToken,
-		// The node-servant will detect the kubeadm_conf_path automatically
-		// It will be either "/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf"
-		// or "/etc/systemd/system/kubelet.service.d/10-kubeadm.conf".
-		"kubeadm_conf_path": "",
-		"working_mode":      string(util.WorkingModeEdge),
-		"enable_dummy_if":   strconv.FormatBool(c.EnableDummyIf),
 	}
 	if c.YurthubHealthCheckTimeout != defaultYurthubHealthCheckTimeout {
 		convertCtx["yurthub_healthcheck_timeout"] = c.YurthubHealthCheckTimeout.String()
 	}
 
-	npExist, err := nodePoolResourceExists(c.ClientSet)
-	if err != nil {
-		return err
-	}
-	convertCtx["enable_node_pool"] = strconv.FormatBool(npExist)
-	klog.Infof("convert context for edge nodes(%q): %#+v", c.EdgeNodes, convertCtx)
-
 	if len(c.EdgeNodes) != 0 {
-		convertCtx["working_mode"] = string(util.WorkingModeEdge)
+		convertCtx["configmap_name"] = yssYurtHubName
 		if err = kubeutil.RunServantJobs(c.ClientSet, c.WaitServantJobTimeout, func(nodeName string) (*batchv1.Job, error) {
 			return nodeservant.RenderNodeServantJob("convert", convertCtx, nodeName)
-		}, c.EdgeNodes, os.Stderr, false); err != nil {
+		}, c.EdgeNodes, os.Stderr); err != nil {
 			// print logs of yurthub
 			for i := range c.EdgeNodes {
 				hubPodName := fmt.Sprintf("yurt-hub-%s", c.EdgeNodes[i])
-				pod, logErr := c.ClientSet.CoreV1().Pods("kube-system").Get(context.TODO(), hubPodName, metav1.GetOptions{})
+				pod, logErr := c.ClientSet.CoreV1().
+					Pods("kube-system").
+					Get(context.TODO(), hubPodName, metav1.GetOptions{})
 				if logErr == nil {
-					kubeutil.PrintPodLog(c.ClientSet, pod, os.Stderr)
+					kubeutil.DumpPod(c.ClientSet, pod, os.Stderr)
 				}
-			}
-
-			// print logs of yurt-manager
-			podList, logErr := c.ClientSet.CoreV1().Pods("kube-system").List(context.TODO(), metav1.ListOptions{
-				LabelSelector: labels.SelectorFromSet(map[string]string{"app.kubernetes.io/name": "yurt-manager"}).String(),
-			})
-			if logErr != nil {
-				klog.Errorf("failed to get yurt-manager pod, %v", logErr)
-				return err
-			}
-
-			if len(podList.Items) == 0 {
-				klog.Errorf("yurt-manager pod doesn't exist")
-				return err
-			}
-			if logErr = kubeutil.PrintPodLog(c.ClientSet, &podList.Items[0], os.Stderr); logErr != nil {
-				return err
 			}
 			return err
 		}
 	}
 
 	// deploy yurt-hub and reset the kubelet service on cloud nodes
-	convertCtx["working_mode"] = string(util.WorkingModeCloud)
+	convertCtx["configmap_name"] = yssYurtHubCloudName
 	klog.Infof("convert context for cloud nodes(%q): %#+v", c.CloudNodes, convertCtx)
 	if err = kubeutil.RunServantJobs(c.ClientSet, c.WaitServantJobTimeout, func(nodeName string) (*batchv1.Job, error) {
 		return nodeservant.RenderNodeServantJob("convert", convertCtx, nodeName)
-	}, c.CloudNodes, os.Stderr, false); err != nil {
+	}, c.CloudNodes, os.Stderr); err != nil {
 		return err
 	}
 
@@ -194,11 +193,6 @@ func prepareYurthubStart(cliSet kubeclientset.Interface, kcfg string) (string, e
 		return "", err
 	}
 
-	// prepare global settings(like RBAC, configmap) for yurthub
-	if err := kubeutil.DeployYurthubSetting(cliSet); err != nil {
-		return "", err
-	}
-
 	// prepare join-token for yurthub
 	joinToken, err := kubeutil.GetOrCreateJoinTokenString(cliSet)
 	if err != nil || joinToken == "" {
@@ -209,7 +203,9 @@ func prepareYurthubStart(cliSet kubeclientset.Interface, kcfg string) (string, e
 
 // prepareClusterInfoConfigMap will create cluster-info configmap in kube-public namespace if it does not exist
 func prepareClusterInfoConfigMap(client kubeclientset.Interface, file string) error {
-	info, err := client.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.Background(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
+	info, err := client.CoreV1().
+		ConfigMaps(metav1.NamespacePublic).
+		Get(context.Background(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 	if err != nil && apierrors.IsNotFound(err) {
 		// Create the cluster-info ConfigMap with the associated RBAC rules
 		if err := kubeadmapi.CreateBootstrapConfigMapIfNotExists(client, file); err != nil {
@@ -226,52 +222,36 @@ func prepareClusterInfoConfigMap(client kubeclientset.Interface, file string) er
 	return nil
 }
 
-func nodePoolResourceExists(client kubeclientset.Interface) (bool, error) {
-	groupVersion := schema.GroupVersion{
-		Group:   "apps.openyurt.io",
-		Version: "v1alpha1",
-	}
-	apiResourceList, err := client.Discovery().ServerResourcesForGroupVersion(groupVersion.String())
-	if err != nil && !apierrors.IsNotFound(err) {
-		klog.Errorf("failed to discover nodepool resource, %v", err)
-		return false, err
-	} else if apiResourceList == nil {
-		return false, nil
-	}
+func (c *ClusterConverter) installYurtManagerByHelm() error {
+	helmPath := filepath.Join(c.RootDir, "bin", "helm")
+	yurtManagerChartPath := filepath.Join(c.RootDir, "charts", "yurt-manager")
 
-	for i := range apiResourceList.APIResources {
-		if apiResourceList.APIResources[i].Name == "nodepools" && apiResourceList.APIResources[i].Kind == "NodePool" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
+	parts := strings.Split(c.YurtManagerImage, "/")
+	imageTagParts := strings.Split(parts[len(parts)-1], ":")
+	tag := imageTagParts[1]
 
-func (c *ClusterConverter) deployYurtManager() error {
-	// create auto generated yaml(including clusterrole and webhooks) for yurt-manager
-	renderedFile, err := generatedAutoGeneratedTempFile(c.RootDir, "kube-system")
+	cmd := exec.Command(
+		helmPath,
+		"install",
+		"yurt-manager",
+		yurtManagerChartPath,
+		"--namespace",
+		"kube-system",
+		"--set",
+		fmt.Sprintf("image.tag=%s", tag),
+		"--set",
+		"log.level=5",
+	)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
+		klog.Errorf("couldn't install yurt-manager, %v", err)
+		klog.Errorf("Helm install output: %s", string(output))
 		return err
 	}
-
-	// get renderedFile parent dir
-	renderedFileDir := filepath.Dir(renderedFile)
-	defer os.RemoveAll(renderedFileDir)
-	if err := c.ComponentsBuilder.InstallComponents(renderedFile, false); err != nil {
-		return err
-	}
-
-	if err := c.ComponentsBuilder.InstallComponents(filepath.Join(c.RootDir, "charts/yurt-manager/crds"), false); err != nil {
-		return err
-	}
-
-	// create yurt-manager
-	if err := kubeutil.CreateYurtManager(c.ClientSet, c.YurtManagerImage); err != nil {
-		return err
-	}
+	klog.Infof("start to install yurt-manager, %s", string(output))
 
 	// waiting yurt-manager pod ready
-	return wait.PollImmediate(10*time.Second, 2*time.Minute, func() (bool, error) {
+	if err = wait.PollUntilContextTimeout(context.Background(), 10*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
 		podList, err := c.ClientSet.CoreV1().Pods("kube-system").List(context.TODO(), metav1.ListOptions{
 			LabelSelector: labels.SelectorFromSet(map[string]string{"app.kubernetes.io/name": "yurt-manager"}).String(),
 		})
@@ -279,45 +259,49 @@ func (c *ClusterConverter) deployYurtManager() error {
 			klog.Errorf("failed to list yurt-manager pod, %v", err)
 			return false, nil
 		} else if len(podList.Items) == 0 {
-			klog.Infof("no yurt-manager pod: %#v", podList)
+			klog.Infof("there is no yurt-manager pod now")
+			return false, nil
+		} else if podList.Items[0].Status.Phase != corev1.PodRunning {
+			klog.Infof("status phase of yurt-manager pod is not running, now is %s", string(podList.Items[0].Status.Phase))
 			return false, nil
 		}
 
-		if podList.Items[0].Status.Phase == corev1.PodRunning {
-			for i := range podList.Items[0].Status.Conditions {
-				if podList.Items[0].Status.Conditions[i].Type == corev1.PodReady &&
-					podList.Items[0].Status.Conditions[i].Status == corev1.ConditionTrue {
-					return true, nil
-				}
+		for i := range podList.Items[0].Status.Conditions {
+			if podList.Items[0].Status.Conditions[i].Type == corev1.PodReady &&
+				podList.Items[0].Status.Conditions[i].Status != corev1.ConditionTrue {
+				klog.Infof("ready condition of pod(%s/%s) is not true", podList.Items[0].Namespace, podList.Items[0].Name)
+				return false, nil
+			}
+			if podList.Items[0].Status.Conditions[i].Type == corev1.ContainersReady &&
+				podList.Items[0].Status.Conditions[i].Status != corev1.ConditionTrue {
+				klog.Info("container ready condition is not true")
+				return false, nil
 			}
 		}
-		klog.Infof("pod(%s/%s): %#v", podList.Items[0].Namespace, podList.Items[0].Name, podList.Items[0])
-		return false, nil
-	})
+
+		return true, nil
+	}); err != nil {
+		c.dumpYurtManagerLog()
+		return err
+	}
+
+	return nil
 }
 
-// generatedAutoGeneratedTempFile will replace {{ .Release.Namespace }} with ns in webhooks
-func generatedAutoGeneratedTempFile(root, ns string) (string, error) {
-	tempDir, err := os.MkdirTemp(root, "yurt-manager")
-	if err != nil {
-		return "", err
+// print logs of yurt-manager
+func (c *ClusterConverter) dumpYurtManagerLog() {
+	// print logs of yurt-manager
+	podList, logErr := c.ClientSet.CoreV1().Pods("kube-system").List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{"app.kubernetes.io/name": "yurt-manager"}).String(),
+	})
+	if logErr != nil {
+		klog.Errorf("failed to get yurt-manager pod, %v", logErr)
 	}
 
-	autoGeneratedYaml := filepath.Join(root, "charts/yurt-manager/templates/yurt-manager-auto-generated.yaml")
-	contents, err := os.ReadFile(autoGeneratedYaml)
-	if err != nil {
-		return "", err
+	if len(podList.Items) == 0 {
+		klog.Errorf("yurt-manager pod doesn't exist")
 	}
-
-	lines := strings.Split(string(contents), "\n")
-	for i, line := range lines {
-		if strings.Contains(line, "{{ .Release.Namespace }}") {
-			lines[i] = strings.ReplaceAll(line, "{{ .Release.Namespace }}", ns)
-		}
+	if logErr = kubeutil.DumpPod(c.ClientSet, &podList.Items[0], os.Stderr); logErr != nil {
+		klog.Warning("failed to dump yurtmanager logs")
 	}
-	newContents := strings.Join(lines, "\n")
-
-	tempFile := filepath.Join(tempDir, "yurt-manager-auto-generated.yaml")
-	klog.Infof("rendered yurt-manager-auto-generated.yaml file: \n%s\n", newContents)
-	return tempFile, os.WriteFile(tempFile, []byte(newContents), 0644)
 }

@@ -28,17 +28,22 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	"github.com/openyurtio/openyurt/pkg/apis/apps"
+	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/base"
 )
 
 const (
+	// FilterName filter is used to discard or keep NodePort service in specified NodePool
+	// in order to make NodePort will not be listened by kube-proxy component in specified NodePool.
+	FilterName = "nodeportisolation"
+
 	ServiceAnnotationNodePortListen = "nodeport.openyurt.io/listen"
 )
 
 // Register registers a filter
-func Register(filters *filter.Filters) {
-	filters.Register(filter.NodePortIsolationName, func() (filter.ObjectFilter, error) {
+func Register(filters *base.Filters) {
+	filters.Register(FilterName, func() (filter.ObjectFilter, error) {
 		return NewNodePortIsolationFilter()
 	})
 }
@@ -54,13 +59,7 @@ func NewNodePortIsolationFilter() (filter.ObjectFilter, error) {
 }
 
 func (nif *nodePortIsolationFilter) Name() string {
-	return filter.NodePortIsolationName
-}
-
-func (nif *nodePortIsolationFilter) SupportedResourceAndVerbs() map[string]sets.String {
-	return map[string]sets.String{
-		"services": sets.NewString("list", "watch"),
-	}
+	return FilterName
 }
 
 func (nif *nodePortIsolationFilter) SetNodePoolName(name string) error {
@@ -80,16 +79,6 @@ func (nif *nodePortIsolationFilter) SetKubeClient(client kubernetes.Interface) e
 
 func (nif *nodePortIsolationFilter) Filter(obj runtime.Object, stopCh <-chan struct{}) runtime.Object {
 	switch v := obj.(type) {
-	case *v1.ServiceList:
-		var svcNew []v1.Service
-		for i := range v.Items {
-			svc := nif.isolateNodePortService(&v.Items[i])
-			if svc != nil {
-				svcNew = append(svcNew, *svc)
-			}
-		}
-		v.Items = svcNew
-		return v
 	case *v1.Service:
 		return nif.isolateNodePortService(v)
 	default:
@@ -98,20 +87,19 @@ func (nif *nodePortIsolationFilter) Filter(obj runtime.Object, stopCh <-chan str
 }
 
 func (nif *nodePortIsolationFilter) isolateNodePortService(svc *v1.Service) *v1.Service {
-	nodePoolName := nif.resolveNodePoolName()
-	// node is not located in NodePool, keep the NodePort service the same as native K8s
-	if len(nodePoolName) == 0 {
-		return svc
-	}
-
-	nsName := fmt.Sprintf("%s/%s", svc.Namespace, svc.Name)
 	if svc.Spec.Type == v1.ServiceTypeNodePort || svc.Spec.Type == v1.ServiceTypeLoadBalancer {
 		if _, ok := svc.Annotations[ServiceAnnotationNodePortListen]; ok {
+			nodePoolName := nif.resolveNodePoolName()
+			// node is not located in NodePool, keep the NodePort service the same as native K8s
+			if len(nodePoolName) == 0 {
+				return svc
+			}
+
 			nodePoolConf := getNodePoolConfiguration(svc.Annotations[ServiceAnnotationNodePortListen])
 			if nodePoolConf.Len() != 0 && isNodePoolEnabled(nodePoolConf, nodePoolName) {
 				return svc
 			} else {
-				klog.V(2).Infof("service(%s) is disabled in nodePool(%s) by nodePortIsolationFilter", nsName, nodePoolName)
+				klog.V(2).Infof("service(%s/%s) is disabled in nodePool(%s) by nodePortIsolationFilter", svc.Namespace, svc.Name, nodePoolName)
 				return nil
 			}
 		}
@@ -127,15 +115,15 @@ func (nif *nodePortIsolationFilter) resolveNodePoolName() string {
 
 	node, err := nif.client.CoreV1().Nodes().Get(context.Background(), nif.nodeName, metav1.GetOptions{})
 	if err != nil {
-		klog.Warningf("skip isolateNodePortService filter, failed to get node(%s), %v", nif.nodeName, err)
+		klog.Warningf("skip isolateNodePortService filter, could not get node(%s), %v", nif.nodeName, err)
 		return nif.nodePoolName
 	}
-	nif.nodePoolName = node.Labels[apps.LabelDesiredNodePool]
+	nif.nodePoolName = node.Labels[projectinfo.GetNodePoolLabel()]
 	return nif.nodePoolName
 }
 
-func getNodePoolConfiguration(v string) sets.String {
-	nodePoolConf := sets.NewString()
+func getNodePoolConfiguration(v string) sets.Set[string] {
+	nodePoolConf := sets.New[string]()
 	nodePoolsForValidation := sets.NewString()
 	for _, name := range strings.Split(v, ",") {
 		name = strings.TrimSpace(name)
@@ -149,7 +137,7 @@ func getNodePoolConfiguration(v string) sets.String {
 	return nodePoolConf
 }
 
-func isNodePoolEnabled(nodePoolConf sets.String, name string) bool {
+func isNodePoolEnabled(nodePoolConf sets.Set[string], name string) bool {
 	if nodePoolConf.Has(name) {
 		return true
 	}

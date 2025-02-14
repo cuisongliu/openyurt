@@ -19,7 +19,7 @@ package options
 import (
 	"github.com/spf13/pflag"
 
-	"github.com/openyurtio/openyurt/pkg/controller/yurtstaticset/config"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/yurtstaticset/config"
 )
 
 const DefaultUpgradeWorkerImage = "openyurt/node-servant:latest"
@@ -31,26 +31,29 @@ type YurtStaticSetControllerOptions struct {
 func NewYurtStaticSetControllerOptions() *YurtStaticSetControllerOptions {
 	return &YurtStaticSetControllerOptions{
 		&config.YurtStaticSetControllerConfiguration{
-			UpgradeWorkerImage: DefaultUpgradeWorkerImage,
+			UpgradeWorkerImage:             DefaultUpgradeWorkerImage,
+			ConcurrentYurtStaticSetWorkers: 3,
 		},
 	}
 }
 
-// AddFlags adds flags related to yurtstaticset for yurt-manager to the specified FlagSet.
+// AddFlags adds flags related to YurtStaticSet for yurt-manager to the specified FlagSet.
 func (o *YurtStaticSetControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	if o == nil {
 		return
 	}
 
 	fs.StringVar(&o.UpgradeWorkerImage, "node-servant-image", o.UpgradeWorkerImage, "Specify node servant pod image used for YurtStaticSet upgrade.")
+	fs.Int32Var(&o.ConcurrentYurtStaticSetWorkers, "concurrent-yurtstaticset-workers", o.ConcurrentYurtStaticSetWorkers, "The number of yurtstaticset objects that are allowed to reconcile concurrently. Larger number = more responsive yurtstaticsets, but more CPU (and network) load")
 }
 
-// ApplyTo fills up yurtstaticset config with options.
+// ApplyTo fills up YurtStaticSet config with options.
 func (o *YurtStaticSetControllerOptions) ApplyTo(cfg *config.YurtStaticSetControllerConfiguration) error {
 	if o == nil {
 		return nil
 	}
 	cfg.UpgradeWorkerImage = o.UpgradeWorkerImage
+	cfg.ConcurrentYurtStaticSetWorkers = o.ConcurrentYurtStaticSetWorkers
 	return nil
 }
 

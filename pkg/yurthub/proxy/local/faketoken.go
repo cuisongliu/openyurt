@@ -53,20 +53,20 @@ func WithFakeTokenInject(handler http.Handler, serializerManager *serializer.Ser
 
 			s := createSerializer(req, tokenRequestGVR, serializerManager)
 			if s == nil {
-				klog.Errorf("skip fake token inject for request %s when cluster is unhealthy, failed to create serializer.", util.ReqString(req))
+				klog.Errorf("skip fake token inject for request %s when cluster is unhealthy, could not create serializer.", util.ReqString(req))
 				writeRequestDirectly(w, req, buf.Bytes(), n)
 				return
 			}
 
-			tokenRequset, err := getTokenRequestWithFakeToken(buf.Bytes(), info, req, s)
+			tokenRequest, err := getTokenRequestWithFakeToken(buf.Bytes(), info, req, s)
 			if err != nil {
-				klog.Errorf("skip fake token inject for request %s when cluster is unhealthy, failed to get token request: %v", util.ReqString(req), err)
+				klog.Errorf("skip fake token inject for request %s when cluster is unhealthy, could not get token request: %v", util.ReqString(req), err)
 				writeRequestDirectly(w, req, buf.Bytes(), n)
 				return
 			}
 
 			klog.Infof("write fake token for request %s when cluster is unhealthy", util.ReqString(req))
-			err = util.WriteObject(http.StatusCreated, tokenRequset, w, req)
+			err = util.WriteObject(http.StatusCreated, tokenRequest, w, req)
 			if err != nil {
 				klog.Errorf("write fake token resp for token request when cluster is unhealthy with error, %v", err)
 			}
@@ -96,7 +96,7 @@ func writeRequestDirectly(w http.ResponseWriter, req *http.Request, data []byte,
 func getTokenRequestWithFakeToken(data []byte, info *apirequest.RequestInfo, req *http.Request, s *serializer.Serializer) (*authv1.TokenRequest, error) {
 	obj, err := s.Decode(data)
 	if err != nil || obj == nil {
-		return nil, errors.Errorf("decode reuqest with error %v", err)
+		return nil, errors.Errorf("decode request with error %v", err)
 	}
 	if tokenRequest, ok := obj.(*authv1.TokenRequest); ok {
 		token, err := getFakeToken(info.Namespace, info.Name)

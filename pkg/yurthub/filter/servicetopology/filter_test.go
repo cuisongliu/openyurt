@@ -26,100 +26,104 @@ import (
 	discoveryV1beta1 "k8s.io/api/discovery/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
+	"github.com/openyurtio/openyurt/pkg/apis"
+	"github.com/openyurtio/openyurt/pkg/apis/apps/v1alpha1"
+	"github.com/openyurtio/openyurt/pkg/apis/apps/v1beta2"
+	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	"github.com/openyurtio/openyurt/pkg/util"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
-	nodepoolv1alpha1 "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/apis/apps/v1alpha1"
-	yurtfake "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/client/clientset/versioned/fake"
-	yurtinformers "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/client/informers/externalversions"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/base"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/initializer"
 )
 
-func TestName(t *testing.T) {
-	stf, _ := NewServiceTopologyFilter()
-	if stf.Name() != filter.ServiceTopologyFilterName {
-		t.Errorf("expect %s, but got %s", filter.ServiceTopologyFilterName, stf.Name())
+const (
+	LabelNodePoolName = "openyurt.io/pool-name"
+)
+
+func TestRegister(t *testing.T) {
+	filters := base.NewFilters([]string{})
+	Register(filters)
+	if !filters.Enabled(FilterName) {
+		t.Errorf("couldn't register %s filter", FilterName)
 	}
 }
 
-func TestSupportedResourceAndVerbs(t *testing.T) {
+func TestName(t *testing.T) {
 	stf, _ := NewServiceTopologyFilter()
-	rvs := stf.SupportedResourceAndVerbs()
-	if len(rvs) != 2 {
-		t.Errorf("supported not two resources, %v", rvs)
-	}
-
-	for resource, verbs := range rvs {
-		if resource != "endpoints" && resource != "endpointslices" {
-			t.Errorf("expect resource is endpoints/endpointslices, but got %s", resource)
-		}
-
-		if !verbs.Equal(sets.NewString("list", "watch")) {
-			t.Errorf("expect verbs are list/watch, but got %v", verbs.UnsortedList())
-		}
+	if stf.Name() != FilterName {
+		t.Errorf("expect %s, but got %s", FilterName, stf.Name())
 	}
 }
 
 func TestFilter(t *testing.T) {
+	scheme := runtime.NewScheme()
+	apis.AddToScheme(scheme)
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps.openyurt.io", Version: "v1beta1", Resource: "nodepools"}: "NodePoolList",
+	}
+	nodeBucketGVRToListKind := map[schema.GroupVersionResource]string{
+		{Group: "apps.openyurt.io", Version: "v1alpha1", Resource: "nodebuckets"}: "NodeBucketList",
+	}
 	currentNodeName := "node1"
 	nodeName2 := "node2"
 	nodeName3 := "node3"
 
 	testcases := map[string]struct {
-		poolName       string
-		nodeName       string
-		responseObject runtime.Object
-		kubeClient     *k8sfake.Clientset
-		yurtClient     *yurtfake.Clientset
-		expectObject   runtime.Object
+		enableNodePool            bool
+		enablePoolServiceTopology bool
+		poolName                  string
+		nodeName                  string
+		responseObject            runtime.Object
+		kubeClient                *k8sfake.Clientset
+		yurtClient                *fake.FakeDynamicClient
+		expectObject              runtime.Object
 	}{
-		"v1beta1.EndpointSliceList: topologyKeys is kubernetes.io/hostname": {
+		"v1beta1.EndpointSlice: topologyKeys is kubernetes.io/hostname": {
 			poolName: "hangzhou",
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			responseObject: &discoveryV1beta1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
@@ -129,7 +133,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -137,7 +141,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -145,7 +149,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -159,112 +163,105 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 						},
 					},
 				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			expectObject: &discoveryV1beta1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
 						},
 					},
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: topologyKeys is openyurt.io/nodepool": {
-			poolName: "hangzhou",
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1beta1.EndpointSlice: topologyKeys is openyurt.io/nodepool": {
+			enableNodePool: true,
+			poolName:       "hangzhou",
+			responseObject: &discoveryV1beta1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
@@ -274,7 +271,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -282,7 +279,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -290,7 +287,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -304,119 +301,114 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 						},
 					},
 				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: topologyKeys is kubernetes.io/zone": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1beta1.EndpointSlice: topologyKeys is kubernetes.io/zone": {
+			enableNodePool: true,
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
@@ -426,7 +418,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -434,7 +426,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -442,7 +434,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -456,119 +448,113 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 						},
 					},
 				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: without openyurt.io/topologyKeys": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1beta1.EndpointSlice: without openyurt.io/topologyKeys": {
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
+						Addresses: []string{
+							"10.244.1.2",
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
-							},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
 						},
 					},
 				},
@@ -578,7 +564,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -586,7 +572,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -594,7 +580,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -606,126 +592,1956 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 						},
 					},
 				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+		},
+		"v1beta1.EndpointSlice: currentNode is not in any nodepool": {
+			enableNodePool: true,
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   currentNodeName,
+						Labels: map[string]string{},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+				},
+			},
+		},
+		"v1beta1.EndpointSlice: currentNode has no endpoints on node": {
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName2,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName3,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+			},
+		},
+		"v1beta1.EndpointSlice: currentNode has no endpoints in nodepool": {
+			enableNodePool: true,
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName2,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName3,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+			},
+		},
+		"v1beta1.EndpointSlice: no service info in endpointslice": {
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName2,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName3,
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName2,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: nodeName3,
+						},
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: topologyKeys is kubernetes.io/hostname": {
+			responseObject: &discovery.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: topologyKeys is openyurt.io/nodepool": {
+			enableNodePool: true,
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: topologyKeys is kubernetes.io/zone": {
+			enableNodePool: true,
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueZone,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: without openyurt.io/topologyKeys": {
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "svc1",
+						Namespace:   "default",
+						Annotations: map[string]string{},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: currentNode is not in any nodepool": {
+			enableNodePool: true,
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   currentNodeName,
+						Labels: map[string]string{},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						NodeName: &currentNodeName,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						NodeName: &currentNodeName,
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: currentNode has no endpoints on node": {
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+							"node3",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+			},
+		},
+		"v1.EndpointSlice: currentNode has no endpoints in nodePool": {
+			enableNodePool: true,
+			responseObject: &discovery.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discovery.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						NodeName: &nodeName2,
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						NodeName: &nodeName3,
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+							"node3",
+						},
+					},
+				},
+			),
+			expectObject: &discovery.EndpointSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discovery.LabelServiceName: "svc1",
+					},
+				},
+			},
+		},
+		"v1.Endpoints: topologyKeys is kubernetes.io/hostname": {
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &corev1.Endpoints{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
 							},
 						},
 					},
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: currentNode is not in any nodepool": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1.Endpoints: topologyKeys is openyurt.io/nodepool": {
+			enableNodePool: true,
+			responseObject: &corev1.Endpoints{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &corev1.Endpoints{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
+							},
+						},
+					},
+				},
+			},
+		},
+		"v1.Endpoints: topologyKeys is kubernetes.io/zone": {
+			enableNodePool: true,
+			responseObject: &corev1.Endpoints{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
+							},
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueZone,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &corev1.Endpoints{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
+							},
+						},
+					},
+				},
+			},
+		},
+		"v1.Endpoints: without openyurt.io/topologyKeys": {
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
+							},
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "svc1",
+						Namespace:   "default",
+						Annotations: map[string]string{},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+							"node3",
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
+						},
+					},
+				},
+			),
+			expectObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
+							},
+						},
+					},
+				},
+			},
+		},
+		"v1.Endpoints: currentNode is not in any nodepool": {
+			enableNodePool: true,
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
+					{
+						Addresses: []corev1.EndpointAddress{
+							{
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
 					},
@@ -742,7 +2558,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -750,7 +2566,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -764,109 +2580,71 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 						},
 					},
 				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+			expectObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
+								IP:       "10.244.1.2",
+								NodeName: &currentNodeName,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
+								IP:       "10.244.1.4",
+								NodeName: &currentNodeName,
 							},
 						},
 					},
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: currentNode has no endpoints on node": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1.Endpoints: currentNode has no endpoints on node": {
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName2,
-								},
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName3,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
 					},
@@ -877,7 +2655,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -885,7 +2663,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -893,7 +2671,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -907,92 +2685,59 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							"node2",
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
-						},
-					},
+			expectObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: currentNode has no endpoints in nodepool": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1.Endpoints: currentNode has no endpoints in nodepool": {
+			enableNodePool: true,
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName2,
-								},
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node2",
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName3,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: "node3",
-								},
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
 					},
@@ -1003,7 +2748,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -1011,7 +2756,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -1019,7 +2764,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -1033,237 +2778,57 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
+						Nodes: []string{
+							currentNodeName,
+						},
+					},
+				},
+				&v1beta2.NodePool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+					},
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
+					},
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 							"node3",
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
 			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discoveryV1beta1.LabelServiceName: "svc1",
-							},
-						},
-					},
+			expectObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
 				},
 			},
 		},
-		"v1beta1.EndpointSliceList: no service info in endpointslice": {
-			responseObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
+		"v1.Endpoints: unknown openyurt.io/topologyKeys": {
+			responseObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
+				},
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-						},
-						Endpoints: []discoveryV1beta1.Endpoint{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName2,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName3,
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
-			),
-			expectObject: &discoveryV1beta1.EndpointSliceList{
-				Items: []discoveryV1beta1.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-						},
-						Endpoints: []discoveryV1beta1.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName2,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: currentNodeName,
-								},
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								Topology: map[string]string{
-									corev1.LabelHostname: nodeName3,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: topologyKeys is kubernetes.io/hostname": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
+								IP:       "10.244.1.3",
 								NodeName: &nodeName2,
 							},
 							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
+								IP:       "10.244.1.5",
 								NodeName: &nodeName3,
 							},
 						},
@@ -1275,7 +2840,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -1283,7 +2848,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -1291,1764 +2856,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: topologyKeys is openyurt.io/nodepool": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: topologyKeys is kubernetes.io/zone": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueZone,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: without openyurt.io/topologyKeys": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:        "svc1",
-						Namespace:   "default",
-						Annotations: map[string]string{},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: currentNode is not in any nodepool": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   currentNodeName,
-						Labels: map[string]string{},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.2",
-								},
-								NodeName: &currentNodeName,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.4",
-								},
-								NodeName: &currentNodeName,
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: currentNode has no endpoints on node": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-							"node3",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointSliceList: currentNode has no endpoints in nodePool": {
-			responseObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-						Endpoints: []discovery.Endpoint{
-							{
-								Addresses: []string{
-									"10.244.1.3",
-								},
-								NodeName: &nodeName2,
-							},
-							{
-								Addresses: []string{
-									"10.244.1.5",
-								},
-								NodeName: &nodeName3,
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-							"node3",
-						},
-					},
-				},
-			),
-			expectObject: &discovery.EndpointSliceList{
-				Items: []discovery.EndpointSlice{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1-np7sf",
-							Namespace: "default",
-							Labels: map[string]string{
-								discovery.LabelServiceName: "svc1",
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: topologyKeys is kubernetes.io/hostname": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: topologyKeys is openyurt.io/nodepool": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: topologyKeys is kubernetes.io/zone": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueZone,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: without openyurt.io/topologyKeys": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:        "svc1",
-						Namespace:   "default",
-						Annotations: map[string]string{},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: currentNode is not in any nodepool": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   currentNodeName,
-						Labels: map[string]string{},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node3",
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.2",
-										NodeName: &currentNodeName,
-									},
-									{
-										IP:       "10.244.1.4",
-										NodeName: &currentNodeName,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: currentNode has no endpoints on node": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNode,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-							"node3",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: currentNode has no endpoints in nodepool": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "svc1",
-						Namespace: "default",
-						Annotations: map[string]string{
-							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
-						},
-					},
-				},
-			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "hangzhou",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							currentNodeName,
-						},
-					},
-				},
-				&nodepoolv1alpha1.NodePool{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "shanghai",
-					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
-					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
-						Nodes: []string{
-							"node2",
-							"node3",
-						},
-					},
-				},
-			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-					},
-				},
-			},
-		},
-		"v1.EndpointsList: unknown openyurt.io/topologyKeys": {
-			responseObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
-				},
-				Items: []corev1.Endpoints{
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
-							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			kubeClient: k8sfake.NewSimpleClientset(
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: currentNodeName,
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node2",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
-						},
-					},
-				},
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "node3",
-						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -3062,28 +2870,28 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 							"node3",
@@ -3091,29 +2899,21 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			expectObject: &corev1.EndpointsList{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "EndpointsList",
-					APIVersion: "v1",
+			expectObject: &corev1.Endpoints{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1",
+					Namespace: "default",
 				},
-				Items: []corev1.Endpoints{
+				Subsets: []corev1.EndpointSubset{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "svc1",
-							Namespace: "default",
-						},
-						Subsets: []corev1.EndpointSubset{
+						Addresses: []corev1.EndpointAddress{
 							{
-								Addresses: []corev1.EndpointAddress{
-									{
-										IP:       "10.244.1.3",
-										NodeName: &nodeName2,
-									},
-									{
-										IP:       "10.244.1.5",
-										NodeName: &nodeName3,
-									},
-								},
+								IP:       "10.244.1.3",
+								NodeName: &nodeName2,
+							},
+							{
+								IP:       "10.244.1.5",
+								NodeName: &nodeName3,
 							},
 						},
 					},
@@ -3132,7 +2932,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: currentNodeName,
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "hangzhou",
+							projectinfo.GetNodePoolLabel(): "hangzhou",
 						},
 					},
 				},
@@ -3140,7 +2940,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node2",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -3148,7 +2948,7 @@ func TestFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "node3",
 						Labels: map[string]string{
-							nodepoolv1alpha1.LabelDesiredNodePool: "shanghai",
+							projectinfo.GetNodePoolLabel(): "shanghai",
 						},
 					},
 				},
@@ -3162,28 +2962,28 @@ func TestFilter(t *testing.T) {
 					},
 				},
 			),
-			yurtClient: yurtfake.NewSimpleClientset(
-				&nodepoolv1alpha1.NodePool{
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind,
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "hangzhou",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							currentNodeName,
 						},
 					},
 				},
-				&nodepoolv1alpha1.NodePool{
+				&v1beta2.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "shanghai",
 					},
-					Spec: nodepoolv1alpha1.NodePoolSpec{
-						Type: nodepoolv1alpha1.Edge,
+					Spec: v1beta2.NodePoolSpec{
+						Type: v1beta2.Edge,
 					},
-					Status: nodepoolv1alpha1.NodePoolStatus{
+					Status: v1beta2.NodePoolStatus{
 						Nodes: []string{
 							"node2",
 							"node3",
@@ -3198,25 +2998,341 @@ func TestFilter(t *testing.T) {
 				},
 			},
 		},
+		"v1beta1.EndpointSlice use node bucket: topologyKeys is openyurt.io/nodepool": {
+			enablePoolServiceTopology: true,
+			poolName:                  "hangzhou",
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, nodeBucketGVRToListKind,
+				&v1alpha1.NodeBucket{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou",
+						Labels: map[string]string{
+							LabelNodePoolName: "hangzhou",
+						},
+					},
+					Nodes: []v1alpha1.Node{
+						{
+							Name: currentNodeName,
+						},
+						{
+							Name: "node3",
+						},
+					},
+				},
+				&v1alpha1.NodeBucket{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+						Labels: map[string]string{
+							LabelNodePoolName: "shanghai",
+						},
+					},
+					Nodes: []v1alpha1.Node{
+						{
+							Name: "node2",
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+		},
+		"v1beta1.EndpointSlice use multiple node buckets: topologyKeys is openyurt.io/nodepool": {
+			enablePoolServiceTopology: true,
+			poolName:                  "hangzhou",
+			responseObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.3",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node2",
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+			kubeClient: k8sfake.NewSimpleClientset(
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: currentNodeName,
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node2",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "shanghai",
+						},
+					},
+				},
+				&corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node3",
+						Labels: map[string]string{
+							projectinfo.GetNodePoolLabel(): "hangzhou",
+						},
+					},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "svc1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationServiceTopologyKey: AnnotationServiceTopologyValueNodePool,
+						},
+					},
+				},
+			),
+			yurtClient: fake.NewSimpleDynamicClientWithCustomListKinds(scheme, nodeBucketGVRToListKind,
+				&v1alpha1.NodeBucket{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou-foo",
+						Labels: map[string]string{
+							LabelNodePoolName: "hangzhou",
+						},
+					},
+					Nodes: []v1alpha1.Node{
+						{
+							Name: currentNodeName,
+						},
+					},
+				},
+				&v1alpha1.NodeBucket{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "hangzhou-bar",
+						Labels: map[string]string{
+							LabelNodePoolName: "hangzhou",
+						},
+					},
+					Nodes: []v1alpha1.Node{
+						{
+							Name: "node3",
+						},
+					},
+				},
+				&v1alpha1.NodeBucket{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "shanghai",
+						Labels: map[string]string{
+							LabelNodePoolName: "shanghai",
+						},
+					},
+					Nodes: []v1alpha1.Node{
+						{
+							Name: "node2",
+						},
+					},
+				},
+			),
+			expectObject: &discoveryV1beta1.EndpointSlice{
+
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "svc1-np7sf",
+					Namespace: "default",
+					Labels: map[string]string{
+						discoveryV1beta1.LabelServiceName: "svc1",
+					},
+				},
+				Endpoints: []discoveryV1beta1.Endpoint{
+					{
+						Addresses: []string{
+							"10.244.1.2",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.4",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: currentNodeName,
+						},
+					},
+					{
+						Addresses: []string{
+							"10.244.1.5",
+						},
+						Topology: map[string]string{
+							corev1.LabelHostname: "node3",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for k, tt := range testcases {
 		t.Run(k, func(t *testing.T) {
 			factory := informers.NewSharedInformerFactory(tt.kubeClient, 24*time.Hour)
-			serviceInformer := factory.Core().V1().Services()
-			serviceInformer.Informer()
-			serviceLister := serviceInformer.Lister()
-			serviceSynced := serviceInformer.Informer().HasSynced
+			stf := &serviceTopologyFilter{}
+			stf.SetSharedInformerFactory(factory)
+			stf.SetKubeClient(tt.kubeClient)
+			stf.SetNodeName(currentNodeName)
+			if len(tt.poolName) != 0 {
+				stf.SetNodePoolName(tt.poolName)
+			}
 
 			stopper := make(chan struct{})
 			defer close(stopper)
 			factory.Start(stopper)
 			factory.WaitForCacheSync(stopper)
 
-			yurtFactory := yurtinformers.NewSharedInformerFactory(tt.yurtClient, 24*time.Hour)
-			nodePoolInformer := yurtFactory.Apps().V1alpha1().NodePools()
-			nodePoolLister := nodePoolInformer.Lister()
-			nodePoolSynced := nodePoolInformer.Informer().HasSynced
+			yurtFactory := dynamicinformer.NewDynamicSharedInformerFactory(tt.yurtClient, 24*time.Hour)
+			nodesInitializer := initializer.NewNodesInitializer(
+				tt.enableNodePool,
+				tt.enablePoolServiceTopology,
+				yurtFactory,
+			)
+			nodesInitializer.Initialize(stf)
 
 			stopper2 := make(chan struct{})
 			defer close(stopper2)
@@ -3224,21 +3340,6 @@ func TestFilter(t *testing.T) {
 			yurtFactory.WaitForCacheSync(stopper2)
 
 			stopCh := make(<-chan struct{})
-			stf := &serviceTopologyFilter{
-				nodeName:       currentNodeName,
-				serviceLister:  serviceLister,
-				nodePoolLister: nodePoolLister,
-				serviceSynced:  serviceSynced,
-				nodePoolSynced: nodePoolSynced,
-				client:         tt.kubeClient,
-			}
-
-			if len(tt.poolName) != 0 {
-				stf.nodePoolName = tt.poolName
-			} else {
-				stf.nodeName = currentNodeName
-			}
-
 			newObj := stf.Filter(tt.responseObject, stopCh)
 			if util.IsNil(newObj) {
 				t.Errorf("empty object is returned")

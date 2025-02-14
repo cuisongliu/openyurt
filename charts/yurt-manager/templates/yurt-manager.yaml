@@ -1,4 +1,10 @@
 apiVersion: v1
+kind: Secret
+metadata:
+  name: yurt-manager-webhook-certs
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: yurt-manager
@@ -9,17 +15,43 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: yurt-manager-rolebinding
+  name: yurt-manager-webhook-role-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: yurt-manager-role
+  name: yurt-manager-webhook
 subjects:
 - kind: ServiceAccount
   name: yurt-manager
   namespace: {{ .Release.Namespace }}
 ---
-
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: yurt-manager-controller-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: yurt-manager-basecontroller
+subjects:
+- kind: ServiceAccount
+  name: yurt-manager
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: yurt-manager-webhook-role-binding
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: yurt-manager-webhook
+subjects:
+  - kind: ServiceAccount
+    name: yurt-manager
+    namespace: {{ .Release.Namespace }}
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -57,6 +89,10 @@ spec:
       labels:
         {{- include "yurt-manager.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if not (empty .Values.image.pullSecrets) }}
+      imagePullSecrets:
+{{ toYaml .Values.image.pullSecrets | indent 8 }}
+      {{- end }}
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/master
@@ -64,13 +100,14 @@ spec:
           key: node-role.kubernetes.io/control-plane
       containers:
         - args:
-            - --enable-leader-election=true
             - --metrics-addr=:{{ .Values.ports.metrics }}
             - --health-probe-addr=:{{ .Values.ports.healthProbe }}
             - --webhook-port={{ .Values.ports.webhook }}
-            - --logtostderr=true
             - --v={{ .Values.log.level }}
             - --working-namespace={{ .Release.Namespace }}
+            {{- if .Values.leaderElectResourceName }}
+            - --leader-elect-resource-name={{ .Values.leaderElectResourceName }}
+            {{- end }}
             {{- if .Values.controllers }}
             - --controllers={{ .Values.controllers }}
             {{- end }}
@@ -79,7 +116,7 @@ spec:
             {{- end }}
           command:
             - /usr/local/bin/yurt-manager
-          image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}
+          image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
           imagePullPolicy: IfNotPresent
           name: yurt-manager
           ports:
@@ -92,11 +129,28 @@ spec:
             - containerPort: {{ .Values.ports.healthProbe }}
               name: health
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.ports.healthProbe }}
+            initialDelaySeconds: 60
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz
               port: {{ .Values.ports.healthProbe }}
+            initialDelaySeconds: 60
+            timeoutSeconds: 2
+            periodSeconds: 10
+            failureThreshold: 2
+          {{- if .Values.resources }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- end }}
       serviceAccountName: yurt-manager
     {{- if .Values.affinity }}
       affinity: {{ toYaml .Values.affinity | nindent 8 }}
     {{- end }}
+---

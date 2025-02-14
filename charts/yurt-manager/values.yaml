@@ -13,7 +13,10 @@ nameOverride: ""
 image:
   registry: openyurt
   repository: yurt-manager
-  tag: v1.3.4
+  tag: ""
+  pullSecrets: []
+  # pullSecrets:
+  #   - name: myRegistryKeySecretName
 
 ports:
   metrics: 10271
@@ -21,10 +24,12 @@ ports:
   webhook: 10273
 
 # format should be "foo,-bar,*"
-controllers: ""
+controllers: "-nodelifecycle,*"
 
 # format should be "foo,*"
 disableIndependentWebhooks: ""
+
+leaderElectResourceName: "cloud-yurt-manager"
 
 # resources of yurt-manager container
 resources:
@@ -40,5 +45,5 @@ affinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
         - matchExpressions:
-            - key: node-role.kubernetes.io/master
+            - key: node-role.kubernetes.io/control-plane
               operator: Exists

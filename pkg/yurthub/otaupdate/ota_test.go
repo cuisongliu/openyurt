@@ -17,29 +17,37 @@ limitations under the License.
 package otaupdate
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/openyurtio/openyurt/cmd/yurthub/app/options"
 	"github.com/openyurtio/openyurt/pkg/yurthub/cachemanager"
-	"github.com/openyurtio/openyurt/pkg/yurthub/healthchecker"
-	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/rest"
+	"github.com/openyurtio/openyurt/pkg/yurthub/certificate/manager"
+	"github.com/openyurtio/openyurt/pkg/yurthub/certificate/testdata"
+	"github.com/openyurtio/openyurt/pkg/yurthub/healthchecker/cloudapiserver"
 	"github.com/openyurtio/openyurt/pkg/yurthub/otaupdate/util"
 	"github.com/openyurtio/openyurt/pkg/yurthub/storage"
 	"github.com/openyurtio/openyurt/pkg/yurthub/storage/disk"
+	"github.com/openyurtio/openyurt/pkg/yurthub/transport"
 )
 
 func TestGetPods(t *testing.T) {
 	dir := t.TempDir()
 	dStorage, err := disk.NewDiskStorage(dir)
 	if err != nil {
-		t.Errorf("failed to create disk storage, %v", err)
+		t.Errorf("couldn't to create disk storage, %v", err)
 	}
 	sWrapper := cachemanager.NewStorageWrapper(dStorage)
 
@@ -58,11 +66,11 @@ func TestGetPods(t *testing.T) {
 			Name:      pod.Name,
 		})
 		if err != nil {
-			t.Errorf("failed to get key, %v", err)
+			t.Errorf("couldn't to get key, %v", err)
 		}
 		err = sWrapper.Create(key, pod)
 		if err != nil {
-			t.Errorf("failed to create obj, %v", err)
+			t.Errorf("cloudn't to create obj, %v", err)
 		}
 	}
 
@@ -98,11 +106,52 @@ func TestUpdatePod(t *testing.T) {
 }
 
 func TestHealthyCheck(t *testing.T) {
-	fakeHealthchecker := healthchecker.NewFakeChecker(false, nil)
-
-	rcm, err := rest.NewRestConfigManager(nil, fakeHealthchecker)
+	testDir, err := os.MkdirTemp("", "test-client")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("failed to make temp dir, %v", err)
+	}
+	nodeName := "foo"
+	servers := map[*url.URL]bool{
+		{Host: "10.10.10.113:6443"}: false,
+	}
+	u, _ := url.Parse("https://10.10.10.113:6443")
+	remoteServers := []*url.URL{u}
+	fakeHealthchecker := cloudapiserver.NewFakeChecker(servers)
+
+	client, err := testdata.CreateCertFakeClient("../certificate/testdata")
+	if err != nil {
+		t.Errorf("failed to create cert fake client, %v", err)
+		return
+	}
+	certManager, err := manager.NewYurtHubCertManager(&options.YurtHubOptions{
+		NodeName:      nodeName,
+		RootDir:       testDir,
+		YurtHubHost:   "127.0.0.1",
+		JoinToken:     "123456.abcdef1234567890",
+		ClientForTest: client,
+	}, remoteServers)
+	if err != nil {
+		t.Errorf("failed to create certManager, %v", err)
+		return
+	}
+	certManager.Start()
+	defer certManager.Stop()
+	defer os.RemoveAll(testDir)
+
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (done bool, err error) {
+		if certManager.Ready() {
+			return true, nil
+		}
+		return false, nil
+	})
+
+	if err != nil {
+		t.Errorf("certificates are not ready, %v", err)
+	}
+
+	clientManager, err := transport.NewTransportAndClientManager(remoteServers, 10, certManager, context.Background().Done())
+	if err != nil {
+		t.Fatalf("could not new transport manager, %v", err)
 	}
 
 	req, err := http.NewRequest("POST", "", nil)
@@ -112,8 +161,8 @@ func TestHealthyCheck(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 
-	HealthyCheck(rcm, "", UpdatePod).ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusForbidden, rr.Code)
+	HealthyCheck(fakeHealthchecker, clientManager, "", UpdatePod).ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
 func Test_preCheck(t *testing.T) {
@@ -126,7 +175,7 @@ func Test_preCheck(t *testing.T) {
 		assert.Equal(t, true, ok)
 	})
 
-	t.Run("Test_preCheckOKGetPodFailed", func(t *testing.T) {
+	t.Run("Test_preCheckCanNotGetPod", func(t *testing.T) {
 		_, ok := preCheck(clientset, metav1.NamespaceDefault, "nginx1", "node")
 		assert.Equal(t, false, ok)
 	})

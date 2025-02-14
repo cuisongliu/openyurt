@@ -21,7 +21,7 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/openyurtio/openyurt/pkg/controller/platformadmin/config"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/platformadmin/config"
 )
 
 type PlatformAdminControllerOptions struct {
@@ -34,14 +34,16 @@ func NewPlatformAdminControllerOptions() *PlatformAdminControllerOptions {
 	}
 }
 
-// AddFlags adds flags related to nodepool for yurt-manager to the specified FlagSet.
+// AddFlags adds flags related to nodePool for yurt-manager to the specified FlagSet.
 func (n *PlatformAdminControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	if n == nil {
 		return
 	}
+
+	fs.Int32Var(&n.ConcurrentPlatformAdminWorkers, "concurrent-platform-administrator-workers", n.ConcurrentPlatformAdminWorkers, "Max concurrent workers for PlatformAdmin controller.")
 }
 
-// ApplyTo fills up nodepool config with options.
+// ApplyTo fills up nodePool config with options.
 func (o *PlatformAdminControllerOptions) ApplyTo(cfg *config.PlatformAdminControllerConfiguration) error {
 	if o == nil {
 		return nil

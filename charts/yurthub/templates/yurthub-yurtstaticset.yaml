@@ -23,7 +23,7 @@ spec:
             type: Directory
       containers:
         - name: yurt-hub
-          image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}
+          image: {{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: hub-dir
@@ -50,8 +50,16 @@ spec:
               host: {{ .Values.yurthubBindingAddr }}
               path: /v1/healthz
               port: 10267
-            initialDelaySeconds: 300
-            periodSeconds: 5
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              host: {{ .Values.yurthubBindingAddr }}
+              path: /v1/readyz
+              port: 10267
+            initialDelaySeconds: 30
+            periodSeconds: 15
             failureThreshold: 3
           resources:
             requests:

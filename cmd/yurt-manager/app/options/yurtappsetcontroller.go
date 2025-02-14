@@ -19,7 +19,7 @@ package options
 import (
 	"github.com/spf13/pflag"
 
-	"github.com/openyurtio/openyurt/pkg/controller/yurtappset/config"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/yurtappset/config"
 )
 
 type YurtAppSetControllerOptions struct {
@@ -28,25 +28,29 @@ type YurtAppSetControllerOptions struct {
 
 func NewYurtAppSetControllerOptions() *YurtAppSetControllerOptions {
 	return &YurtAppSetControllerOptions{
-		&config.YurtAppSetControllerConfiguration{},
+		&config.YurtAppSetControllerConfiguration{
+			ConcurrentYurtAppSetWorkers: 3,
+		},
 	}
 }
 
-// AddFlags adds flags related to nodepool for yurt-manager to the specified FlagSet.
+// AddFlags adds flags related to nodePool for yurt-manager to the specified FlagSet.
 func (n *YurtAppSetControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	if n == nil {
 		return
 	}
 
-	//fs.BoolVar(&n.CreateDefaultPool, "create-default-pool", n.CreateDefaultPool, "Create default cloud/edge pools if indicated.")
+	fs.Int32Var(&n.ConcurrentYurtAppSetWorkers, "concurrent-yurtappset-workers", n.ConcurrentYurtAppSetWorkers, "The number of yurtappset objects that are allowed to reconcile concurrently. Larger number = more responsive yurtappsets, but more CPU (and network) load")
+
 }
 
-// ApplyTo fills up nodepool config with options.
+// ApplyTo fills up nodePool config with options.
 func (o *YurtAppSetControllerOptions) ApplyTo(cfg *config.YurtAppSetControllerConfiguration) error {
 	if o == nil {
 		return nil
 	}
 
+	cfg.ConcurrentYurtAppSetWorkers = o.ConcurrentYurtAppSetWorkers
 	return nil
 }
 

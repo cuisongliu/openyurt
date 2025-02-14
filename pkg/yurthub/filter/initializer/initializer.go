@@ -21,17 +21,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
-	yurtinformers "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/client/informers/externalversions"
 )
 
 // WantsSharedInformerFactory is an interface for setting SharedInformerFactory
 type WantsSharedInformerFactory interface {
 	SetSharedInformerFactory(factory informers.SharedInformerFactory) error
-}
-
-// WantsYurtSharedInformerFactory is an interface for setting Yurt-App-Manager SharedInformerFactory
-type WantsYurtSharedInformerFactory interface {
-	SetYurtSharedInformerFactory(yurtFactory yurtinformers.SharedInformerFactory) error
 }
 
 // WantsNodeName is an interface for setting node name
@@ -58,7 +52,6 @@ type WantsKubeClient interface {
 // genericFilterInitializer is responsible for initializing generic filter
 type genericFilterInitializer struct {
 	factory           informers.SharedInformerFactory
-	yurtFactory       yurtinformers.SharedInformerFactory
 	nodeName          string
 	nodePoolName      string
 	masterServiceHost string
@@ -67,13 +60,9 @@ type genericFilterInitializer struct {
 }
 
 // New creates an filterInitializer object
-func New(factory informers.SharedInformerFactory,
-	yurtFactory yurtinformers.SharedInformerFactory,
-	kubeClient kubernetes.Interface,
-	nodeName, nodePoolName, masterServiceHost, masterServicePort string) filter.Initializer {
+func New(factory informers.SharedInformerFactory, kubeClient kubernetes.Interface, nodeName, nodePoolName, masterServiceHost, masterServicePort string) filter.Initializer {
 	return &genericFilterInitializer{
 		factory:           factory,
-		yurtFactory:       yurtFactory,
 		nodeName:          nodeName,
 		nodePoolName:      nodePoolName,
 		masterServiceHost: masterServiceHost,
@@ -108,12 +97,6 @@ func (fi *genericFilterInitializer) Initialize(ins filter.ObjectFilter) error {
 
 	if wants, ok := ins.(WantsSharedInformerFactory); ok {
 		if err := wants.SetSharedInformerFactory(fi.factory); err != nil {
-			return err
-		}
-	}
-
-	if wants, ok := ins.(WantsYurtSharedInformerFactory); ok {
-		if err := wants.SetYurtSharedInformerFactory(fi.yurtFactory); err != nil {
 			return err
 		}
 	}
