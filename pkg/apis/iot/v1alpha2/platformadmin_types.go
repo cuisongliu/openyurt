@@ -40,9 +40,6 @@ type PlatformAdminConditionSeverity string
 // Component defines the components of EdgeX
 type Component struct {
 	Name string `json:"name"`
-
-	// +optional
-	Image string `json:"image,omitempty"`
 }
 
 // PlatformAdminSpec defines the desired state of PlatformAdmin
@@ -104,11 +101,11 @@ type PlatformAdminCondition struct {
 // +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,path=platformadmins,shortName=pa,categories=all
+// +kubebuilder:resource:scope=Namespaced,path=platformadmins,shortName=pa,categories=yurt
 // +kubebuilder:printcolumn:name="READY",type="boolean",JSONPath=".status.ready",description="The platformadmin ready status"
 // +kubebuilder:printcolumn:name="ReadyComponentNum",type="integer",JSONPath=".status.readyComponentNum",description="The Ready Component."
 // +kubebuilder:printcolumn:name="UnreadyComponentNum",type="integer",JSONPath=".status.unreadyComponentNum",description="The Unready Component."
-// +kubebuilder:storageversion
+// +kubebuilder:unservedversion
 
 // PlatformAdmin is the Schema for the samples API
 type PlatformAdmin struct {

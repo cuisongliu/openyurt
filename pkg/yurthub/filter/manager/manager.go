@@ -17,80 +17,101 @@ limitations under the License.
 package manager
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 
-	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 
-	"github.com/openyurtio/openyurt/cmd/yurthub/app/options"
+	yurtoptions "github.com/openyurtio/openyurt/cmd/yurthub/app/options"
+	"github.com/openyurtio/openyurt/pkg/yurthub/configuration"
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/discardcloudservice"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/inclusterconfig"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/approver"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/base"
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter/initializer"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/masterservice"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/nodeportisolation"
-	"github.com/openyurtio/openyurt/pkg/yurthub/filter/servicetopology"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/objectfilter"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/responsefilter"
 	"github.com/openyurtio/openyurt/pkg/yurthub/kubernetes/serializer"
 	"github.com/openyurtio/openyurt/pkg/yurthub/util"
-	yurtinformers "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/client/informers/externalversions"
 )
 
 type Manager struct {
 	filter.Approver
 	nameToObjectFilter map[string]filter.ObjectFilter
 	serializerManager  *serializer.SerializerManager
+	resourceSyncers    []filter.ResourceSyncer
 }
 
-func NewFilterManager(options *options.YurtHubOptions,
+func NewFilterManager(options *yurtoptions.YurtHubOptions,
 	sharedFactory informers.SharedInformerFactory,
-	yurtSharedFactory yurtinformers.SharedInformerFactory,
+	dynamicSharedFactory dynamicinformer.DynamicSharedInformerFactory,
 	proxiedClient kubernetes.Interface,
 	serializerManager *serializer.SerializerManager,
-	apiserverAddr string) (*Manager, error) {
-	if !options.EnableResourceFilter {
-		return nil, nil
-	}
+	configManager *configuration.Manager) (filter.FilterFinder, error) {
+	var err error
+	nameToFilters := make(map[string]filter.ObjectFilter)
+	if options.EnableResourceFilter {
+		// 1. new base filters
+		if options.WorkingMode == string(util.WorkingModeCloud) {
+			options.DisabledResourceFilters = append(options.DisabledResourceFilters, yurtoptions.DisabledInCloudMode...)
+		}
+		filters := base.NewFilters(options.DisabledResourceFilters)
 
-	if options.WorkingMode == string(util.WorkingModeCloud) {
-		options.DisabledResourceFilters = append(options.DisabledResourceFilters, filter.DisabledInCloudMode...)
-	}
-	filters := filter.NewFilters(options.DisabledResourceFilters)
-	registerAllFilters(filters)
+		// 2. register all filter factory
+		yurtoptions.RegisterAllFilters(filters)
 
-	mutatedMasterServiceHost, mutatedMasterServicePort, _ := net.SplitHostPort(apiserverAddr)
-	if options.AccessServerThroughHub {
-		mutatedMasterServicePort = strconv.Itoa(options.YurtHubProxySecurePort)
+		// 3. prepare filter initializer chain
+		mutatedMasterServicePort := strconv.Itoa(options.YurtHubProxySecurePort)
+		mutatedMasterServiceHost := options.YurtHubProxyHost
 		if options.EnableDummyIf {
 			mutatedMasterServiceHost = options.HubAgentDummyIfIP
-		} else {
-			mutatedMasterServiceHost = options.YurtHubProxyHost
+		}
+		genericInitializer := initializer.New(sharedFactory, proxiedClient, options.NodeName, options.NodePoolName, mutatedMasterServiceHost, mutatedMasterServicePort)
+		nodesInitializer := initializer.NewNodesInitializer(options.EnableNodePool, options.EnablePoolServiceTopology, dynamicSharedFactory)
+		initializerChain := base.Initializers{}
+		initializerChain = append(initializerChain, genericInitializer, nodesInitializer)
+
+		// 4. initialize all object filters
+		nameToFilters, err = filters.NewFromFilters(initializerChain)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	objFilters, err := createObjectFilters(filters, sharedFactory, yurtSharedFactory, proxiedClient, options.NodeName, options.NodePoolName, mutatedMasterServiceHost, mutatedMasterServicePort)
-	if err != nil {
-		return nil, err
+	resourceSyncers := make([]filter.ResourceSyncer, 0)
+	for name, objFilter := range nameToFilters {
+		if resourceSyncer, ok := objFilter.(filter.ResourceSyncer); ok {
+			klog.Infof("filter %s need to sync resource before starting to work", name)
+			resourceSyncers = append(resourceSyncers, resourceSyncer)
+		}
 	}
 
-	m := &Manager{
-		nameToObjectFilter: make(map[string]filter.ObjectFilter),
+	// 5. new filter manager including approver and nameToObjectFilter
+	// if resource filters are disabled, nameToObjectFilter and resourceSyncers will be empty silces.
+	return &Manager{
+		Approver:           approver.NewApprover(options.NodeName, configManager),
+		nameToObjectFilter: nameToFilters,
 		serializerManager:  serializerManager,
-	}
+		resourceSyncers:    resourceSyncers,
+	}, nil
+}
 
-	filterSupportedResAndVerbs := make(map[string]map[string]sets.String)
-	for i := range objFilters {
-		m.nameToObjectFilter[objFilters[i].Name()] = objFilters[i]
-		filterSupportedResAndVerbs[objFilters[i].Name()] = objFilters[i].SupportedResourceAndVerbs()
+func (m *Manager) HasSynced() bool {
+	for i := range m.resourceSyncers {
+		if !m.resourceSyncers[i].HasSynced() {
+			return false
+		}
 	}
-	m.Approver = filter.NewApprover(sharedFactory, filterSupportedResAndVerbs)
-
-	return m, nil
+	return true
 }
 
 func (m *Manager) FindResponseFilter(req *http.Request) (filter.ResponseFilter, bool) {
+	if len(m.nameToObjectFilter) == 0 {
+		return nil, false
+	}
+
 	approved, filterNames := m.Approver.Approve(req)
 	if approved {
 		objectFilters := make([]filter.ObjectFilter, 0)
@@ -104,34 +125,32 @@ func (m *Manager) FindResponseFilter(req *http.Request) (filter.ResponseFilter, 
 			return nil, false
 		}
 
-		return filter.CreateResponseFilter(filter.CreateFilterChain(objectFilters), m.serializerManager), true
+		return responsefilter.CreateResponseFilter(objectFilters, m.serializerManager), true
 	}
 
 	return nil, false
 }
 
-// createObjectFilters return all object filters that initializations completed.
-func createObjectFilters(filters *filter.Filters,
-	sharedFactory informers.SharedInformerFactory,
-	yurtSharedFactory yurtinformers.SharedInformerFactory,
-	proxiedClient kubernetes.Interface,
-	nodeName, nodePoolName, mutatedMasterServiceHost, mutatedMasterServicePort string) ([]filter.ObjectFilter, error) {
-	if filters == nil {
-		return nil, nil
+func (m *Manager) FindObjectFilter(req *http.Request) (filter.ObjectFilter, bool) {
+	if len(m.nameToObjectFilter) == 0 {
+		return nil, false
 	}
 
-	genericInitializer := initializer.New(sharedFactory, yurtSharedFactory, proxiedClient, nodeName, nodePoolName, mutatedMasterServiceHost, mutatedMasterServicePort)
-	initializerChain := filter.Initializers{}
-	initializerChain = append(initializerChain, genericInitializer)
-	return filters.NewFromFilters(initializerChain)
-}
+	approved, filterNames := m.Approver.Approve(req)
+	if !approved {
+		return nil, false
+	}
 
-// registerAllFilters by order, the front registered filter will be
-// called before the latter registered ones.
-func registerAllFilters(filters *filter.Filters) {
-	servicetopology.Register(filters)
-	masterservice.Register(filters)
-	discardcloudservice.Register(filters)
-	inclusterconfig.Register(filters)
-	nodeportisolation.Register(filters)
+	objectFilters := make([]filter.ObjectFilter, 0)
+	for i := range filterNames {
+		if objectFilter, ok := m.nameToObjectFilter[filterNames[i]]; ok {
+			objectFilters = append(objectFilters, objectFilter)
+		}
+	}
+
+	if len(objectFilters) == 0 {
+		return nil, false
+	}
+
+	return objectfilter.CreateFilterChain(objectFilters), true
 }

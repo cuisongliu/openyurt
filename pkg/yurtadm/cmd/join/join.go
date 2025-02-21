@@ -30,7 +30,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 
-	"github.com/openyurtio/openyurt/pkg/controller/yurtstaticset/util"
+	"github.com/openyurtio/openyurt/pkg/projectinfo"
 	kubeconfigutil "github.com/openyurtio/openyurt/pkg/util/kubeconfig"
 	"github.com/openyurtio/openyurt/pkg/util/kubernetes/kubeadm/app/util/apiclient"
 	"github.com/openyurtio/openyurt/pkg/yurtadm/cmd/join/joindata"
@@ -39,7 +39,7 @@ import (
 	"github.com/openyurtio/openyurt/pkg/yurtadm/util/edgenode"
 	yurtadmutil "github.com/openyurtio/openyurt/pkg/yurtadm/util/kubernetes"
 	"github.com/openyurtio/openyurt/pkg/yurtadm/util/yurthub"
-	nodepoolv1alpha1 "github.com/openyurtio/yurt-app-manager-api/pkg/yurtappmanager/apis/apps/v1alpha1"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/yurtstaticset/util"
 )
 
 type joinOptions struct {
@@ -223,7 +223,7 @@ type joinData struct {
 	token                    string
 	tlsBootstrapCfg          *clientcmdapi.Config
 	clientSet                *clientset.Clientset
-	ignorePreflightErrors    sets.String
+	ignorePreflightErrors    sets.Set[string]
 	organizations            string
 	pauseImage               string
 	yurthubImage             string
@@ -261,6 +261,10 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 		return nil, errors.New("join token is empty, so unable to bootstrap worker node.")
 	}
 
+	if !yurtadmutil.IsValidBootstrapToken(opt.token) {
+		return nil, errors.Errorf("the bootstrap token %s was not of the form %s", opt.token, yurtconstants.BootstrapTokenPattern)
+	}
+
 	if opt.nodeType != yurtconstants.EdgeNode && opt.nodeType != yurtconstants.CloudNode {
 		return nil, errors.Errorf("node type(%s) is invalid, only \"edge and cloud\" are supported", opt.nodeType)
 	}
@@ -271,15 +275,18 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 		return nil, errors.Errorf("when --discovery-token-ca-cert-hash is not specified, --discovery-token-unsafe-skip-ca-verification should be true")
 	}
 
-	ignoreErrors := sets.String{}
+	ignoreErrors := sets.Set[string]{}
 	for i := range opt.ignorePreflightErrors {
 		ignoreErrors.Insert(opt.ignorePreflightErrors[i])
+	}
+	if !ignoreErrors.Has("all") {
+		ignoreErrors.Insert(yurtconstants.KubeletConfFileAvailableError, yurtconstants.ManifestsDirAvailableError)
 	}
 
 	// Either use specified nodename or get hostname from OS envs
 	name, err := edgenode.GetHostname(opt.nodeName)
 	if err != nil {
-		klog.Errorf("failed to get node name, %v", err)
+		klog.Errorf("could not get node name, %v", err)
 		return nil, err
 	}
 
@@ -323,7 +330,7 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 	// get tls bootstrap config
 	cfg, err := yurtadmutil.RetrieveBootstrapConfig(data)
 	if err != nil {
-		klog.Errorf("failed to retrieve bootstrap config, %v", err)
+		klog.Errorf("could not retrieve bootstrap config, %v", err)
 		return nil, err
 	}
 	data.tlsBootstrapCfg = cfg
@@ -331,33 +338,27 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 	// get kubernetes version
 	client, err := kubeconfigutil.ToClientSet(cfg)
 	if err != nil {
-		klog.Errorf("failed to create bootstrap client, %v", err)
+		klog.Errorf("could not create bootstrap client, %v", err)
 		return nil, err
 	}
 	data.clientSet = client
 
 	k8sVersion, err := yurtadmutil.GetKubernetesVersionFromCluster(client)
 	if err != nil {
-		klog.Errorf("failed to get kubernetes version, %v", err)
+		klog.Errorf("could not get kubernetes version, %v", err)
 		return nil, err
 	}
 	data.kubernetesVersion = k8sVersion
 
 	// check whether specified nodePool exists
 	if len(opt.nodePoolName) != 0 {
-		yurtClient, err := kubeconfigutil.ToYurtClientSet(cfg)
-		if err != nil {
-			klog.Errorf("failed to create yurt client, %v", err)
-			return nil, err
-		}
-
-		np, err := apiclient.GetNodePoolInfoWithRetry(yurtClient, opt.nodePoolName)
+		np, err := apiclient.GetNodePoolInfoWithRetry(cfg, opt.nodePoolName)
 		if err != nil || np == nil {
 			// the specified nodePool not exist, return
 			return nil, errors.Errorf("when --nodepool-name is specified, the specified nodePool should be exist.")
 		}
 		// add nodePool label for node by kubelet
-		data.nodeLabels[nodepoolv1alpha1.LabelDesiredNodePool] = opt.nodePoolName
+		data.nodeLabels[projectinfo.GetNodePoolLabel()] = opt.nodePoolName
 	}
 
 	// check static pods has value and yurtstaticset is already exist
@@ -402,7 +403,7 @@ func newJoinData(args []string, opt *joinOptions) (*joinData, error) {
 
 	yurthubManifest, yurthubTemplate, err := yurtadmutil.GetStaticPodTemplateFromConfigMap(client, opt.namespace, util.WithConfigMapPrefix(yurthubYurtStaticSetName))
 	if err != nil {
-		klog.Errorf("hard-code yurthub manifest will be used, because failed to get yurthub template from kube-apiserver, %v", err)
+		klog.Errorf("hard-code yurthub manifest will be used, because could not get yurthub template from kube-apiserver, %v", err)
 		yurthubManifest = yurtconstants.YurthubStaticPodManifest
 		yurthubTemplate = yurtconstants.YurthubTemplate
 
@@ -472,7 +473,7 @@ func (j *joinData) NodeRegistration() *joindata.NodeRegistration {
 }
 
 // IgnorePreflightErrors returns the list of preflight errors to ignore.
-func (j *joinData) IgnorePreflightErrors() sets.String {
+func (j *joinData) IgnorePreflightErrors() sets.Set[string] {
 	return j.ignorePreflightErrors
 }
 

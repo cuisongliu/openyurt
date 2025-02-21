@@ -103,13 +103,14 @@ type PlatformAdminCondition struct {
 // +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced,path=platformadmins,shortName=pa,categories=all
+// +kubebuilder:resource:scope=Namespaced,path=platformadmins,shortName=pa,categories=yurt
 // +kubebuilder:printcolumn:name="READY",type="boolean",JSONPath=".status.ready",description="The platform ready status"
 // +kubebuilder:printcolumn:name="Service",type="integer",JSONPath=".status.serviceReplicas",description="The Service Replica."
 // +kubebuilder:printcolumn:name="ReadyService",type="integer",JSONPath=".status.serviceReadyReplicas",description="The Ready Service Replica."
 // +kubebuilder:printcolumn:name="Deployment",type="integer",JSONPath=".status.deploymentReplicas",description="The Deployment Replica."
 // +kubebuilder:printcolumn:name="ReadyDeployment",type="integer",JSONPath=".status.deploymentReadyReplicas",description="The Ready Deployment Replica."
 // +kubebuilder:deprecatedversion:warning="iot.openyurt.io/v1alpha1 PlatformAdmin will be deprecated in future; use iot.openyurt.io/v1alpha2 PlatformAdmin; v1alpha1 PlatformAdmin.Spec.ServiceType only support ClusterIP"
+// +kubebuilder:unservedversion
 
 // PlatformAdmin is the Schema for the samples API
 type PlatformAdmin struct {

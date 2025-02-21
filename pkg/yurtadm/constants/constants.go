@@ -57,6 +57,9 @@ const (
 	KubeletHostname        = "--hostname-override=[^\"\\s]*"
 	KubeletEnvironmentFile = "EnvironmentFile=.*"
 
+	BootstrapTokenPattern = `\A([a-z0-9]{6})\.([a-z0-9]{16})\z`
+	PlaceholderToken      = "abcdef.0123456789abcdef"
+
 	DaemonReload      = "systemctl daemon-reload"
 	RestartKubeletSvc = "systemctl restart kubelet"
 
@@ -112,6 +115,9 @@ const (
 	ReuseCNIBin = "reuse-cni-bin"
 	// StaticPods flag set the specified static pods on this node want to install
 	StaticPods = "static-pods"
+
+	KubeletConfFileAvailableError = "FileAvailable--etc-kubernetes-kubelet.conf"
+	ManifestsDirAvailableError    = "DirAvailable--etc-kubernetes-manifests"
 
 	DefaultServerAddr            = "https://127.0.0.1:6443"
 	ServerHealthzServer          = "127.0.0.1:10267"
@@ -175,8 +181,6 @@ nodeRegistration:
   criSocket: {{.criSocket}}
   name: {{.name}}
   ignorePreflightErrors:
-    - FileAvailable--etc-kubernetes-kubelet.conf
-    - DirAvailable--etc-kubernetes-manifests
     {{- range $index, $value := .ignorePreflightErrors}}
     - {{$value}}
     {{- end}}

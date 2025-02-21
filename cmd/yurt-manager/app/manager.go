@@ -17,32 +17,39 @@ limitations under the License.
 package app
 
 import (
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/term"
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	runtimewebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/openyurtio/openyurt/cmd/yurt-manager/app/config"
 	"github.com/openyurtio/openyurt/cmd/yurt-manager/app/options"
+	"github.com/openyurtio/openyurt/cmd/yurt-manager/names"
 	"github.com/openyurtio/openyurt/pkg/apis"
-	extclient "github.com/openyurtio/openyurt/pkg/client"
-	"github.com/openyurtio/openyurt/pkg/controller"
-	"github.com/openyurtio/openyurt/pkg/profile"
 	"github.com/openyurtio/openyurt/pkg/projectinfo"
-	"github.com/openyurtio/openyurt/pkg/webhook"
-	"github.com/openyurtio/openyurt/pkg/webhook/util"
+	"github.com/openyurtio/openyurt/pkg/util/profile"
+	controller "github.com/openyurtio/openyurt/pkg/yurtmanager/controller/base"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/webhook"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/webhook/util"
 )
 
 var (
@@ -91,10 +98,11 @@ current state towards the desired state.`,
 			if s.Generic.Version {
 				return
 			}
+			projectinfo.RegisterVersionInfo(metrics.Registry, projectinfo.GetYurtManagerName())
 
 			PrintFlags(cmd.Flags())
 
-			c, err := s.Config()
+			c, err := s.Config(controller.KnownControllers(), names.YurtManagerControllerAliases())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
@@ -116,7 +124,14 @@ current state towards the desired state.`,
 	}
 
 	fs := cmd.Flags()
-	namedFlagSets := s.Flags()
+
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	namedFlagSets := s.Flags(controller.KnownControllers(), controller.ControllersDisabledByDefault.List())
 	// verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name())
 	for _, f := range namedFlagSets.FlagSets {
@@ -134,10 +149,12 @@ current state towards the desired state.`,
 		cliflag.PrintSections(cmd.OutOrStdout(), namedFlagSets, cols)
 	})
 
+	config.WorkingNamespace = s.Generic.WorkingNamespace
+
 	return cmd
 }
 
-// PrintFlags logs the flags in the flagset
+// PrintFlags logs the flags in the flagSet
 func PrintFlags(flags *pflag.FlagSet) {
 	flags.VisitAll(func(flag *pflag.Flag) {
 		klog.V(1).Infof("FLAG: --%s=%q", flag.Name, flag.Value)
@@ -146,34 +163,43 @@ func PrintFlags(flags *pflag.FlagSet) {
 
 // Run runs the KubeControllerManagerOptions.  This should never exit.
 func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
-
-	ctrl.SetLogger(klogr.New())
-
 	ctx := ctrl.SetupSignalHandler()
 	cfg := ctrl.GetConfigOrDie()
-
 	setRestConfig(cfg, c)
 
-	setupLog.Info("new clientset registry")
-	err := extclient.NewRegistry(cfg)
-	if err != nil {
-		setupLog.Error(err, "unable to init yurt-manager clientset and informer")
-		os.Exit(1)
+	metricsServerOpts := metricsserver.Options{
+		BindAddress:   c.ComponentConfig.Generic.MetricsAddr,
+		ExtraHandlers: make(map[string]http.Handler, 0),
+	}
+	for path, handler := range profile.GetPprofHandlers() {
+		metricsServerOpts.ExtraHandlers[path] = handler
 	}
 
+	trimManagedFields := func(obj interface{}) (interface{}, error) {
+		if accessor, err := meta.Accessor(obj); err == nil {
+			if accessor.GetManagedFields() != nil {
+				accessor.SetManagedFields(nil)
+			}
+		}
+		return obj, nil
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                     scheme,
-		MetricsBindAddress:         c.ComponentConfig.Generic.MetricsAddr,
+		Metrics:                    metricsServerOpts,
 		HealthProbeBindAddress:     c.ComponentConfig.Generic.HealthProbeAddr,
-		LeaderElection:             c.ComponentConfig.Generic.EnableLeaderElection,
-		LeaderElectionID:           YurtManager,
-		LeaderElectionNamespace:    c.ComponentConfig.Generic.LeaderElectionNamespace,
-		LeaderElectionResourceLock: resourcelock.LeasesResourceLock,
-		Port:                       util.GetWebHookPort(),
-		Namespace:                  "",
-		Logger:                     setupLog,
-		CertDir:                    util.GetCertDir(),
-		Host:                       "0.0.0.0",
+		LeaderElection:             c.ComponentConfig.Generic.LeaderElection.LeaderElect,
+		LeaderElectionID:           c.ComponentConfig.Generic.LeaderElection.ResourceName,
+		LeaderElectionNamespace:    c.ComponentConfig.Generic.LeaderElection.ResourceNamespace,
+		LeaderElectionResourceLock: c.ComponentConfig.Generic.LeaderElection.ResourceLock,
+		WebhookServer: runtimewebhook.NewServer(runtimewebhook.Options{
+			Host:    "0.0.0.0",
+			Port:    util.GetWebHookPort(),
+			CertDir: util.GetCertDir(),
+		}),
+		Logger: setupLog,
+		Cache: cache.Options{
+			DefaultTransform: trimManagedFields,
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -181,7 +207,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	}
 
 	setupLog.Info("setup controllers")
-	if err = controller.SetupWithManager(c, mgr); err != nil {
+	if err = controller.SetupWithManager(ctx, c, mgr); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
@@ -192,23 +218,29 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		os.Exit(1)
 	}
 
-	// +kubebuilder:scaffold:builder
-	setupLog.Info("initialize webhook")
-	if err := webhook.Initialize(ctx, c); err != nil {
-		setupLog.Error(err, "unable to initialize webhook")
-		os.Exit(1)
-	}
-
-	if err := mgr.AddReadyzCheck("webhook-ready", mgr.GetWebhookServer().StartedChecker()); err != nil {
-		setupLog.Error(err, "unable to add readyz check")
-		os.Exit(1)
-	}
-
-	for path, handler := range profile.GetPprofHandlers() {
-		if err := mgr.AddMetricsExtraHandler(path, handler); err != nil {
-			setupLog.Error(err, "unable to add pprof handler")
+	if len(webhook.WebhookHandlerPath) != 0 {
+		// +kubebuilder:scaffold:builder
+		setupLog.Info("initialize webhook")
+		if err := webhook.Initialize(ctx, c, mgr.GetConfig()); err != nil {
+			setupLog.Error(err, "unable to initialize webhook")
 			os.Exit(1)
 		}
+
+		if err := mgr.AddReadyzCheck("webhook-ready", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			setupLog.Error(err, "unable to add readyz check")
+			os.Exit(1)
+		}
+	} else {
+		klog.Infof("no webhook is registered, so skip webhook setup")
+	}
+
+	if err := mgr.AddHealthzCheck("health", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("check", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
 	}
 
 	setupLog.Info("starting manager")
@@ -216,6 +248,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+	klog.V(5).Info("start manager successfully")
 
 	return nil
 }

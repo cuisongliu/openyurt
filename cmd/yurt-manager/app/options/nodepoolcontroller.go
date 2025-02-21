@@ -19,7 +19,7 @@ package options
 import (
 	"github.com/spf13/pflag"
 
-	"github.com/openyurtio/openyurt/pkg/controller/nodepool/config"
+	"github.com/openyurtio/openyurt/pkg/yurtmanager/controller/nodepool/config"
 )
 
 type NodePoolControllerOptions struct {
@@ -29,26 +29,29 @@ type NodePoolControllerOptions struct {
 func NewNodePoolControllerOptions() *NodePoolControllerOptions {
 	return &NodePoolControllerOptions{
 		&config.NodePoolControllerConfiguration{
-			CreateDefaultPool: false,
+			EnableSyncNodePoolConfigurations: true,
+			ConcurrentNodePoolWorkers:        3,
 		},
 	}
 }
 
-// AddFlags adds flags related to nodepool for yurt-manager to the specified FlagSet.
+// AddFlags adds flags related to nodePool for yurt-manager to the specified FlagSet.
 func (n *NodePoolControllerOptions) AddFlags(fs *pflag.FlagSet) {
 	if n == nil {
 		return
 	}
 
-	fs.BoolVar(&n.CreateDefaultPool, "create-default-pool", n.CreateDefaultPool, "Create default cloud/edge pools if indicated.")
+	fs.BoolVar(&n.EnableSyncNodePoolConfigurations, "enable-sync-nodepool-configurations", n.EnableSyncNodePoolConfigurations, "enable to sync nodepool configurations(including labels, annotations, taints in spec) to nodes in the nodepool.")
+	fs.Int32Var(&n.ConcurrentNodePoolWorkers, "concurrent-nodepool-workers", n.ConcurrentNodePoolWorkers, "The number of nodepool objects that are allowed to reconcile concurrently.")
 }
 
-// ApplyTo fills up nodepool config with options.
+// ApplyTo fills up nodePool config with options.
 func (o *NodePoolControllerOptions) ApplyTo(cfg *config.NodePoolControllerConfiguration) error {
 	if o == nil {
 		return nil
 	}
-	cfg.CreateDefaultPool = o.CreateDefaultPool
+	cfg.EnableSyncNodePoolConfigurations = o.EnableSyncNodePoolConfigurations
+	cfg.ConcurrentNodePoolWorkers = o.ConcurrentNodePoolWorkers
 
 	return nil
 }

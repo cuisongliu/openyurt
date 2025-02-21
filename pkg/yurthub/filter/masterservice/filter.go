@@ -21,21 +21,25 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	"github.com/openyurtio/openyurt/pkg/yurthub/filter"
+	"github.com/openyurtio/openyurt/pkg/yurthub/filter/base"
 )
 
 const (
+	// FilterName filter is used to mutate the ClusterIP and https port of default/kubernetes service
+	// in order to pods on edge nodes can access kube-apiserver directly by inClusterConfig.
+	FilterName = "masterservice"
+
 	MasterServiceNamespace = "default"
 	MasterServiceName      = "kubernetes"
 	MasterServicePortName  = "https"
 )
 
 // Register registers a filter
-func Register(filters *filter.Filters) {
-	filters.Register(filter.MasterServiceFilterName, func() (filter.ObjectFilter, error) {
+func Register(filters *base.Filters) {
+	filters.Register(FilterName, func() (filter.ObjectFilter, error) {
 		return NewMasterServiceFilter()
 	})
 }
@@ -50,19 +54,12 @@ func NewMasterServiceFilter() (filter.ObjectFilter, error) {
 }
 
 func (msf *masterServiceFilter) Name() string {
-	return filter.MasterServiceFilterName
-}
-
-func (msf *masterServiceFilter) SupportedResourceAndVerbs() map[string]sets.String {
-	return map[string]sets.String{
-		"services": sets.NewString("list", "watch"),
-	}
+	return FilterName
 }
 
 func (msf *masterServiceFilter) SetMasterServiceHost(host string) error {
 	msf.host = host
 	return nil
-
 }
 
 func (msf *masterServiceFilter) SetMasterServicePort(portStr string) error {
@@ -76,35 +73,24 @@ func (msf *masterServiceFilter) SetMasterServicePort(portStr string) error {
 
 func (msf *masterServiceFilter) Filter(obj runtime.Object, _ <-chan struct{}) runtime.Object {
 	switch v := obj.(type) {
-	case *v1.ServiceList:
-		for i := range v.Items {
-			newSvc, mutated := msf.mutateMasterService(&v.Items[i])
-			if mutated {
-				v.Items[i] = *newSvc
-				break
-			}
-		}
-		return v
 	case *v1.Service:
-		svc, _ := msf.mutateMasterService(v)
-		return svc
+		msf.mutateMasterService(v)
+		return v
 	default:
 		return v
 	}
 }
 
-func (msf *masterServiceFilter) mutateMasterService(svc *v1.Service) (*v1.Service, bool) {
-	mutated := false
+func (msf *masterServiceFilter) mutateMasterService(svc *v1.Service) {
 	if svc.Namespace == MasterServiceNamespace && svc.Name == MasterServiceName {
 		svc.Spec.ClusterIP = msf.host
+		svc.Spec.ClusterIPs = []string{msf.host}
 		for j := range svc.Spec.Ports {
 			if svc.Spec.Ports[j].Name == MasterServicePortName {
 				svc.Spec.Ports[j].Port = msf.port
 				break
 			}
 		}
-		mutated = true
-		klog.V(2).Infof("mutate master service with ClusterIP:Port=%s:%d", msf.host, msf.port)
+		klog.Infof("mutate master service with ClusterIP:Port=%s:%d", msf.host, msf.port)
 	}
-	return svc, mutated
 }

@@ -19,11 +19,13 @@ package yurthub
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,7 +76,7 @@ func AddYurthubStaticYaml(data joindata.YurtJoinData, podManifestPath string) er
 		ctx["nodePoolName"] = data.NodeRegistration().NodePoolName
 	}
 
-	yurthubTemplate, err := templates.SubsituteTemplate(data.YurtHubTemplate(), ctx)
+	yurthubTemplate, err := templates.SubstituteTemplate(data.YurtHubTemplate(), ctx)
 	if err != nil {
 		return err
 	}
@@ -125,7 +127,7 @@ func CheckYurthubHealthz(yurthubServer string) error {
 		return err
 	}
 	client := &http.Client{}
-	return wait.PollImmediate(time.Second*5, 300*time.Second, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second*5, 300*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			return false, nil
@@ -145,7 +147,7 @@ func CheckYurthubReadyz(yurthubServer string) error {
 		return err
 	}
 	client := &http.Client{}
-	return wait.PollImmediate(time.Second*5, 300*time.Second, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second*5, 300*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			return false, nil
@@ -187,12 +189,15 @@ func CleanHubBootstrapConfig() error {
 func useRealServerAddr(yurthubTemplate string, kubernetesServerAddrs string) (string, error) {
 	scanner := bufio.NewScanner(bytes.NewReader([]byte(yurthubTemplate)))
 	var buffer bytes.Buffer
-	target := fmt.Sprintf("%v=%v", constants.ServerAddr, constants.DefaultServerAddr)
+	// compile ipv4 regex
+	ipRegex := regexp.MustCompile(`https?://(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d+`)
 
+	// scan template and replace setAddr
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.Contains(line, target) {
-			line = strings.Replace(line, constants.DefaultServerAddr, kubernetesServerAddrs, -1)
+		if strings.Contains(line, fmt.Sprintf("- --%s=", constants.ServerAddr)) {
+			// replace kubernetesServerAddrs by new addr
+			line = ipRegex.ReplaceAllString(line, kubernetesServerAddrs)
 		}
 		buffer.WriteString(line + "\n")
 	}

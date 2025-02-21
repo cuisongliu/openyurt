@@ -10,8 +10,9 @@ yurthubBindingAddr: 127.0.0.1
 kubernetesServerAddr: https://127.0.0.1:6443
 bootstrapFile: "/var/lib/yurthub/bootstrap-hub.conf"
 organizations: ""
+nodePoolName: ""
 
 image:
   registry: openyurt
   repository: yurthub
-  tag: v1.3.4
+  tag: ""

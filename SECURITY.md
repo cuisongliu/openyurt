@@ -8,10 +8,10 @@ as well as the last minor version of the previous major release.
 Here's an overview:
 
 | Version | Supported           |
-| ------- | ------------------- |
-| 1.0.x   | :white_check_mark: |
-| 0.7.x   | :white_check_mark:  |
-| < 0.7   | :x:                 |
+|---------| ------------------- |
+| 1.4.x   | :white_check_mark: |
+| 1.3.x   | :white_check_mark:  |
+| < 1.3   | :x:                 |
 
 ## Prevention
 

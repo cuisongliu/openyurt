@@ -26,8 +26,6 @@ type NodePoolType string
 const (
 	Edge  NodePoolType = "Edge"
 	Cloud NodePoolType = "Cloud"
-
-	NodePoolTypeLabelKey = "openyurt.io/node-pool-type"
 )
 
 // NodePoolSpec defines the desired state of NodePool
@@ -36,9 +34,11 @@ type NodePoolSpec struct {
 	// +optional
 	Type NodePoolType `json:"type,omitempty"`
 
-	// A label query over nodes to consider for adding to the pool
-	// +optional
-	Selector *metav1.LabelSelector `json:"selector,omitempty"`
+	// HostNetwork is used to specify that cni components(like flannel)
+	// will not be installed on the nodes of this NodePool.
+	// This means all pods on the nodes of this NodePool will use
+	// HostNetwork and share network namespace with host machine.
+	HostNetwork bool `json:"hostNetwork,omitempty"`
 
 	// If specified, the Labels will be added to all nodes.
 	// NOTE: existing labels with samy keys on the nodes will be overwritten.
@@ -70,10 +70,9 @@ type NodePoolStatus struct {
 	Nodes []string `json:"nodes,omitempty"`
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +genclient
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,path=nodepools,shortName=np,categories=all
+// +kubebuilder:resource:scope=Cluster,path=nodepools,shortName=np,categories=yurt
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type",description="The type of nodepool"
 // +kubebuilder:printcolumn:name="ReadyNodes",type="integer",JSONPath=".status.readyNodeNum",description="The number of ready nodes in the pool"
 // +kubebuilder:printcolumn:name="NotReadyNodes",type="integer",JSONPath=".status.unreadyNodeNum"
